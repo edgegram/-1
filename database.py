@@ -42,6 +42,8 @@ def init_db():
             conn.execute("ALTER TABLE users ADD COLUMN last_bonus TEXT")
         if "streak_days" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN streak_days INTEGER NOT NULL DEFAULT 0")
+        if "banned" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0")
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS admins (
@@ -127,6 +129,28 @@ def top_players(limit: int = 10):
         ).fetchall()
 
 
+def top_players_excluding(exclude_ids: set[int], limit: int = 10):
+    """Leaderboard of regular players only — admins/owner excluded so staff balances
+    (topped up via /give etc.) don't crowd out real players."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT user_id, username, balance FROM users ORDER BY balance DESC"
+        ).fetchall()
+    return [r for r in rows if r["user_id"] not in exclude_ids][:limit]
+
+
+def take_balance(user_id: int, amount: int) -> int:
+    """Deduct up to `amount`, clamped so balance never goes below 0. Returns the amount actually removed."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        if row is None:
+            return 0
+        removed = min(amount, row["balance"])
+        conn.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (removed, user_id))
+        conn.commit()
+        return removed
+
+
 def admin_add_balance(user_id: int, amount: int):
     """Admin credit/debit that does NOT count as a game (no games_played/won/lost change)."""
     with get_conn() as conn:
@@ -184,16 +208,16 @@ def record_group_activity(chat_id: int, user_id: int):
         conn.commit()
 
 
-def get_group_top(chat_id: int, limit: int = 10):
+def get_group_top(chat_id: int, exclude_ids: set[int] = frozenset(), limit: int = 10):
     with get_conn() as conn:
-        return conn.execute("""
-            SELECT u.username, u.balance
+        rows = conn.execute("""
+            SELECT u.user_id, u.username, u.balance
             FROM users u
             JOIN group_seen g ON g.user_id = u.user_id
             WHERE g.chat_id = ?
             ORDER BY u.balance DESC
-            LIMIT ?
-        """, (chat_id, limit)).fetchall()
+        """, (chat_id,)).fetchall()
+    return [r for r in rows if r["user_id"] not in exclude_ids][:limit]
 
 
 def get_group_user_ids(chat_id: int) -> list[int]:
@@ -252,3 +276,25 @@ def get_bot_stats() -> dict:
             FROM users
         """).fetchone()
         return dict(row)
+
+
+# ---------------- Bans ----------------
+
+def set_banned(user_id: int, banned: bool):
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET banned = ? WHERE user_id = ?", (1 if banned else 0, user_id))
+        conn.commit()
+
+
+def is_banned(user_id: int) -> bool:
+    with get_conn() as conn:
+        row = conn.execute("SELECT banned FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return bool(row["banned"]) if row else False
+
+
+# ---------------- Owner: full economy reset ----------------
+
+def reset_all_balances(new_balance: int):
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET balance = ?", (new_balance,))
+        conn.commit()

@@ -194,6 +194,39 @@ def play_keno(picks: list[int]) -> tuple[list[int], int, float]:
     return drawn, matches, multiplier
 
 
+# ---------- Plinko ----------
+# Multiplier slots for a 12-row (13-slot) board — symmetric, edges pay big and rare, middle pays low.
+PLINKO_MULTIPLIERS = [8, 3, 1.5, 1, 0.5, 0.3, 0.2, 0.3, 0.5, 1, 1.5, 3, 8]
+
+
+def drop_plinko_ball() -> tuple[int, float]:
+    """Simulates a ball bouncing left/right down the board (binomial walk) and returns
+    (slot_index, multiplier)."""
+    rows = len(PLINKO_MULTIPLIERS) - 1
+    position = sum(random.choice([0, 1]) for _ in range(rows))
+    return position, PLINKO_MULTIPLIERS[position]
+
+
+# ---------- Baccarat (упрощённая версия) ----------
+def _baccarat_hand_value() -> int:
+    # two random digits 0-9, summed mod 10 (mirrors real baccarat's card-point-mod-10 rule)
+    return (random.randint(0, 9) + random.randint(0, 9)) % 10
+
+
+def play_baccarat(bet: str) -> tuple[int, int, str]:
+    """bet: 'player', 'banker' or 'tie'. Returns (player_value, banker_value, outcome)
+    where outcome is 'player'/'banker'/'tie' — whichever actually won."""
+    player = _baccarat_hand_value()
+    banker = _baccarat_hand_value()
+    if player == banker:
+        outcome = "tie"
+    elif player > banker:
+        outcome = "player"
+    else:
+        outcome = "banker"
+    return player, banker, outcome
+
+
 # ---------- Mines ----------
 GRID_SIZE = 5  # 5x5 = 25 cells
 MINES_HOUSE_EDGE = 0.97
