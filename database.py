@@ -19,6 +19,9 @@ DEFAULT_SETTINGS = {
     "max_bet": "50000",
     "lottery_duration_seconds": "120",
     "lottery_house_edge": "0.05",
+    "work_cooldown_minutes": "30",
+    "work_min": "50",
+    "work_max": "300",
 }
 
 
@@ -44,6 +47,8 @@ def init_db():
             conn.execute("ALTER TABLE users ADD COLUMN streak_days INTEGER NOT NULL DEFAULT 0")
         if "banned" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN banned INTEGER NOT NULL DEFAULT 0")
+        if "last_work" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN last_work TEXT")
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS admins (
@@ -167,6 +172,18 @@ def get_last_bonus(user_id: int) -> str | None:
 def set_last_bonus(user_id: int, iso_timestamp: str):
     with get_conn() as conn:
         conn.execute("UPDATE users SET last_bonus = ? WHERE user_id = ?", (iso_timestamp, user_id))
+        conn.commit()
+
+
+def get_last_work(user_id: int) -> str | None:
+    with get_conn() as conn:
+        row = conn.execute("SELECT last_work FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return row["last_work"] if row else None
+
+
+def set_last_work(user_id: int, iso_timestamp: str):
+    with get_conn() as conn:
+        conn.execute("UPDATE users SET last_work = ? WHERE user_id = ?", (iso_timestamp, user_id))
         conn.commit()
 
 

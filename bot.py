@@ -53,6 +53,7 @@ BASE_COMMANDS = [
     BotCommand(command="start", description="Начать / приветствие"),
     BotCommand(command="balance", description="Баланс"),
     BotCommand(command="daily", description="Ежедневный бонус"),
+    BotCommand(command="work", description="Поработать за тенге"),
     BotCommand(command="pay", description="Перевести тенге игроку"),
     BotCommand(command="mystats", description="Моя статистика"),
     BotCommand(command="top", description="Топ игроков"),
@@ -107,6 +108,8 @@ OWNER_COMMANDS = [
     BotCommand(command="setstartbalance", description="[owner] Стартовый баланс новых игроков"),
     BotCommand(command="setlotteryduration", description="[owner] Длительность раунда лотереи"),
     BotCommand(command="setlotteryedge", description="[owner] Комиссия лотереи"),
+    BotCommand(command="setworkreward", description="[owner] Награда за /work"),
+    BotCommand(command="setworkcooldown", description="[owner] Кулдаун /work"),
     BotCommand(command="resetalleconomy", description="[owner] Сбросить баланс всем игрокам"),
 ]
 
@@ -173,6 +176,12 @@ dp.message.middleware(GroupTrackerMiddleware())
 dp.message.middleware(BanMiddleware())
 
 
+@dp.errors()
+async def global_error_handler(event):
+    logging.exception("Unhandled error while processing update: %s", event.exception)
+    return True  # mark as handled so the bot keeps polling instead of crashing
+
+
 def parse_bet(arg: str, balance: int) -> int | None:
     try:
         amount = int(arg)
@@ -223,7 +232,8 @@ async def cmd_start(message: Message):
         f"Игр много: /coinflip, /dice, /slots, /roulette, /rps, /wheel, /keno, /mines, "
         f"/blackjack, /hl, /crash, /lottery — полный список с описанием открывается по кнопке "
         f"<b>/</b> рядом с полем ввода.\n\n"
-        f"Полезное: /balance, /daily (бонус со стриком), /pay (перевод тенге), /mystats, /top.\n"
+        f"Полезное: /balance, /daily (бонус со стриком), /work (подработка), /pay (перевод тенге), "
+        f"/mystats, /top.\n"
         f"В группах доступны /duel (вызов на дуэль) и /grouptop.",
         reply_markup=channel_keyboard(),
     )
@@ -288,6 +298,36 @@ async def cmd_daily(message: Message):
         f"🎁 Ежедневный бонус получен: <b>+{bonus}</b> тенге!\n"
         f"🔥 Серия: <b>{streak}</b> {'день' if streak == 1 else 'дней'} подряд\n"
         f"Баланс: <b>{new_balance}</b> ₸\nПриходи через 24 часа, чтобы не сбить серию."
+    )
+
+
+@dp.message(Command("work"))
+async def cmd_work(message: Message):
+    user = db.get_or_create_user(message.from_user.id, message.from_user.username or message.from_user.first_name)
+    uid = user["user_id"]
+    now = datetime.now(timezone.utc)
+    cooldown_minutes = int(db.get_setting("work_cooldown_minutes", 30))
+
+    last_work_str = db.get_last_work(uid)
+    if last_work_str:
+        elapsed = now - datetime.fromisoformat(last_work_str)
+        remaining = timedelta(minutes=cooldown_minutes) - elapsed
+        if remaining.total_seconds() > 0:
+            minutes, seconds = divmod(int(remaining.total_seconds()), 60)
+            await message.answer(f"⏳ Ты уже поработал. Отдохни ещё <b>{minutes}м {seconds}с</b>.")
+            return
+
+    work_min = int(db.get_setting("work_min", 50))
+    work_max = int(db.get_setting("work_max", 300))
+    reward = random.randint(work_min, work_max)
+    job = games.do_work()
+
+    db.admin_add_balance(uid, reward)
+    db.set_last_work(uid, now.isoformat())
+    new_balance = db.get_balance(uid)
+    await message.answer(
+        f"{job}\n💰 Заработал: <b>+{reward}</b> тенге\nБаланс: <b>{new_balance}</b> ₸\n"
+        f"Следующая работа через {cooldown_minutes} мин."
     )
 
 
@@ -1637,7 +1677,9 @@ async def cmd_economy(message: Message):
         f"Мин. ставка: {s.get('min_bet')}\n"
         f"Макс. ставка: {s.get('max_bet')}\n"
         f"Длительность раунда лотереи: {s.get('lottery_duration_seconds')} сек.\n"
-        f"Комиссия лотереи: {float(s.get('lottery_house_edge', 0)) * 100:.0f}%"
+        f"Комиссия лотереи: {float(s.get('lottery_house_edge', 0)) * 100:.0f}%\n"
+        f"Награда /work: {s.get('work_min')}-{s.get('work_max')} тенге\n"
+        f"Кулдаун /work: {s.get('work_cooldown_minutes')} мин."
     )
 
 
@@ -1723,6 +1765,37 @@ async def cmd_setlotteryedge(message: Message):
         return
     db.set_setting("lottery_house_edge", percent / 100)
     await message.answer(f"✅ Комиссия лотереи теперь {percent:.0f}%.")
+
+
+@dp.message(Command("setworkreward"))
+async def cmd_setworkreward(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 3 or not (parts[1].isdigit() and parts[2].isdigit()) or int(parts[1]) > int(parts[2]):
+        await message.answer("Использование: <code>/setworkreward [мин] [макс]</code>, например "
+                              "<code>/setworkreward 50 300</code>.")
+        return
+    db.set_setting("work_min", int(parts[1]))
+    db.set_setting("work_max", int(parts[2]))
+    await message.answer(f"✅ Награда за /work теперь от {parts[1]} до {parts[2]} тенге.")
+
+
+@dp.message(Command("setworkcooldown"))
+async def cmd_setworkcooldown(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("Использование: <code>/setworkcooldown [время]</code>, например "
+                              "<code>20m</code>, <code>1h</code>.")
+        return
+    seconds = parse_duration(parts[1])
+    if seconds is None or seconds <= 0:
+        await message.answer("Не понял время. Примеры: 10m, 30m, 1h.")
+        return
+    db.set_setting("work_cooldown_minutes", seconds // 60)
+    await message.answer(f"✅ Кулдаун /work теперь {format_duration(seconds)}.")
 
 
 @dp.message(Command("resetalleconomy"))
