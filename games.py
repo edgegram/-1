@@ -94,23 +94,6 @@ def check_roulette_win(bet: str, number: int, color: str) -> tuple[bool, float]:
     return win, 36.0 if win else 0
 
 
-# ---------- Rock-Paper-Scissors vs bot ----------
-RPS_OPTIONS = {"rock": "🪨", "paper": "📄", "scissors": "✂️"}
-RPS_BEATS = {"rock": "scissors", "paper": "rock", "scissors": "paper"}
-
-
-def play_rps(choice: str) -> tuple[str, str]:
-    """returns (bot_choice, result) where result is 'win'/'lose'/'draw'"""
-    bot_choice = random.choice(list(RPS_OPTIONS.keys()))
-    if bot_choice == choice:
-        result = "draw"
-    elif RPS_BEATS[choice] == bot_choice:
-        result = "win"
-    else:
-        result = "lose"
-    return bot_choice, result
-
-
 # ---------- Wheel of fortune ----------
 WHEEL_SEGMENTS = [0, 0.5, 1, 1.5, 2, 3, 5, 10]
 WHEEL_WEIGHTS = [15, 20, 20, 15, 12, 10, 6, 2]
@@ -154,101 +137,57 @@ def dealer_play(cards: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return cards
 
 
-# ---------- Higher / Lower (карта больше/меньше) ----------
-CARD_RANK_ORDER = {r: i for i, r in enumerate(
-    ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"], start=2
-)}
-
-
-def play_higher_lower(guess: str) -> tuple[tuple[str, str], tuple[str, str], str]:
-    """Returns (first_card, second_card, outcome) where outcome is 'win'/'lose'/'push'"""
-    first = draw_card()
-    second = draw_card()
-    v1, v2 = CARD_RANK_ORDER[first[0]], CARD_RANK_ORDER[second[0]]
-    if v1 == v2:
+# ---------- Трейд верх/вниз ----------
+def play_trade(guess: str) -> tuple[float, float, str]:
+    """Simulates a short price move. Returns (price_before, price_after, outcome) where
+    outcome is 'win'/'lose'/'push'."""
+    price_before = round(random.uniform(50, 500), 2)
+    change_percent = random.uniform(-8, 8)
+    price_after = round(price_before * (1 + change_percent / 100), 2)
+    if price_after == price_before:
         outcome = "push"
-    elif (guess == "higher" and v2 > v1) or (guess == "lower" and v2 < v1):
+    elif (guess == "up" and price_after > price_before) or (guess == "down" and price_after < price_before):
         outcome = "win"
     else:
         outcome = "lose"
-    return first, second, outcome
-
-
-# ---------- Keno ----------
-KENO_POOL = list(range(1, 21))  # numbers 1-20
-KENO_DRAWN_COUNT = 8
-# multiplier by (numbers picked, numbers matched)
-KENO_PAYTABLE = {
-    1: {1: 3.5},
-    2: {1: 1, 2: 8},
-    3: {1: 0.5, 2: 2, 3: 15},
-    4: {2: 1, 3: 5, 4: 25},
-}
-
-
-def play_keno(picks: list[int]) -> tuple[list[int], int, float]:
-    drawn = random.sample(KENO_POOL, KENO_DRAWN_COUNT)
-    matches = len(set(picks) & set(drawn))
-    table = KENO_PAYTABLE.get(len(picks), {})
-    multiplier = table.get(matches, 0)
-    return drawn, matches, multiplier
-
-
-# ---------- Plinko ----------
-# Multiplier slots for a 12-row (13-slot) board — symmetric, edges pay big and rare, middle pays low.
-PLINKO_MULTIPLIERS = [8, 3, 1.5, 1, 0.5, 0.3, 0.2, 0.3, 0.5, 1, 1.5, 3, 8]
-
-
-def drop_plinko_ball() -> tuple[int, float]:
-    """Simulates a ball bouncing left/right down the board (binomial walk) and returns
-    (slot_index, multiplier)."""
-    rows = len(PLINKO_MULTIPLIERS) - 1
-    position = sum(random.choice([0, 1]) for _ in range(rows))
-    return position, PLINKO_MULTIPLIERS[position]
-
-
-# ---------- Baccarat (упрощённая версия) ----------
-def _baccarat_hand_value() -> int:
-    # two random digits 0-9, summed mod 10 (mirrors real baccarat's card-point-mod-10 rule)
-    return (random.randint(0, 9) + random.randint(0, 9)) % 10
-
-
-def play_baccarat(bet: str) -> tuple[int, int, str]:
-    """bet: 'player', 'banker' or 'tie'. Returns (player_value, banker_value, outcome)
-    where outcome is 'player'/'banker'/'tie' — whichever actually won."""
-    player = _baccarat_hand_value()
-    banker = _baccarat_hand_value()
-    if player == banker:
-        outcome = "tie"
-    elif player > banker:
-        outcome = "player"
-    else:
-        outcome = "banker"
-    return player, banker, outcome
+    return price_before, price_after, outcome
 
 
 # ---------- Work (/work) ----------
+# Each job: (label, min_pay, max_pay) — pay tiers roughly mirror real-world pay differences
+# (a doctor or banker earns more per shift than a cleaner or factory hand).
 WORK_JOBS = [
-    "🎰 Раздавал листовки у входа в казино",
-    "🃏 Считал фишки на кассе",
-    "🧹 Мыл покерные столы после закрытия",
-    "🍹 Разносил напитки VIP-гостям",
-    "🎓 Стажировался крупье за рулеточным столом",
-    "🎫 Продавал лотерейные билеты на улице",
-    "🔧 Чистил и настраивал слот-машины",
-    "💪 Работал вышибалой на входе",
-    "💵 Пересчитывал наличку в кассе",
-    "🏍 Развозил выигрыши курьером",
-    "🎡 Настраивал колесо рулетки перед сменой",
-    "🔐 Охранял хранилище фишек",
-    "🚗 Мыл лимузин важного гостя",
-    "📦 Разгружал ящики с игральными картами",
-    "🍸 Подрабатывал барменом на afterparty",
+    ("🚛 Дальнобойщик — съездил в рейс", 400, 800),
+    ("⚡ Электрик — чинил проводку", 350, 700),
+    ("🩺 Врач — принял смену в больнице", 800, 1500),
+    ("📚 Учитель — провёл уроки в школе", 200, 450),
+    ("🏭 Завод — отстоял смену у станка", 150, 350),
+    ("⛏ Вахта — отработал вахтовую смену", 600, 1200),
+    ("🎭 Агентство — рандомная подработка на съёмке", 100, 900),
+    ("🧱 Строитель — клал кирпичи на объекте", 300, 600),
+    ("🧹 Уборщик — убрал офисное здание", 100, 250),
+    ("📦 Доставщик — развозил заказы", 150, 400),
+    ("🚕 Такси — покатал пассажиров по городу", 250, 550),
+    ("💻 Программист — закрыл тикеты в проекте", 700, 1400),
+    ("🎨 Дизайнер — сделал макет для клиента", 400, 900),
+    ("💇 Парикмахер — постриг клиентов", 250, 500),
+    ("📷 Фотограф — отснял фотосессию", 300, 700),
+    ("🛍 Продавец — отстоял смену в магазине", 150, 350),
+    ("🍔 Доставщик еды — развозил заказы из ресторанов", 150, 350),
+    ("🏦 Банкир — закрыл сделки в офисе", 900, 1800),
+    ("🧮 Бухгалтер — свёл отчётность", 400, 800),
+    ("💪 Грузчик — разгрузил фуру", 150, 350),
 ]
 
+DELIVERY_SERVICES = ["Ozon", "Wildberries", "Яндекс Маркет", "СДЭК", "Авито Доставка", "Почта России"]
 
-def do_work() -> str:
-    return random.choice(WORK_JOBS)
+
+def do_work() -> tuple[str, int]:
+    label, min_pay, max_pay = random.choice(WORK_JOBS)
+    if label.startswith("📦 Доставщик —"):
+        label = f"📦 Доставщик {random.choice(DELIVERY_SERVICES)} — развозил заказы"
+    pay = random.randint(min_pay, max_pay)
+    return label, pay
 
 
 # ---------- Mines ----------
@@ -268,3 +207,119 @@ def next_mines_multiplier(current_multiplier: float, revealed_count: int, mines_
     if safe_unopened <= 0:
         return current_multiplier
     return round(current_multiplier * (unopened / safe_unopened) * MINES_HOUSE_EDGE, 3)
+
+
+# ---------- Businesses (passive income shop) ----------
+# id: (name, price, income_per_hour, emoji, image_filename)
+BUSINESSES = {
+    1: ("Ларёк с шаурмой", 5_000, 50, "🌯", "biz1.png"),
+    2: ("Автомойка", 15_000, 150, "🚿", "biz2.png"),
+    3: ("Барбершоп", 30_000, 300, "💈", "biz3.png"),
+    4: ("Кофейня", 50_000, 500, "☕", "biz4.png"),
+    5: ("Автосервис", 100_000, 1_000, "🔧", "biz5.png"),
+    6: ("Ресторан", 250_000, 2_500, "🍽", "biz6.png"),
+    7: ("Строительная фирма", 500_000, 5_000, "🏗", "biz7.png"),
+    8: ("Логистическая компания", 1_000_000, 10_000, "🚛", "biz8.png"),
+    9: ("IT-компания", 2_500_000, 25_000, "💻", "biz9.png"),
+    10: ("Сеть отелей", 5_000_000, 50_000, "🏨", "biz10.png"),
+}
+
+# Passive income stops accumulating past this many hours since last collection,
+# so leaving the bot untouched for weeks doesn't create huge free payouts.
+BUSINESS_MAX_ACCRUAL_HOURS = 24
+
+# Utility bills / vehicle tax stop accruing past this many hours since last payment,
+# so ignoring the bot for weeks doesn't create an absurd debt.
+BILLS_MAX_ACCRUAL_HOURS = 72
+
+
+# ---------- Property (real estate, aviation & watercraft — cosmetic status items) ----------
+# category_key: (label, emoji)
+PROPERTY_CATEGORIES = {
+    "apartment": ("Квартиры", "🏢"),
+    "house": ("Дома", "🏡"),
+    "plane": ("Самолёты", "✈️"),
+    "helicopter": ("Вертолёты", "🚁"),
+    "boat": ("Водный транспорт", "🛥"),
+}
+
+# id: (category_key, name, price, image_filename)
+PROPERTY = {
+    1: ("apartment", "Однушка в спальном районе", 2_000_000, "apt1.png"),
+    2: ("apartment", "Двушка в новостройке", 4_500_000, "apt2.png"),
+    3: ("apartment", "Трёшка в центре города", 9_000_000, "apt3.png"),
+    4: ("apartment", "Квартира с панорамным видом", 18_000_000, "apt4.png"),
+    5: ("apartment", "Элитный пентхаус", 35_000_000, "apt5.png"),
+
+    6: ("house", "Дачный домик", 3_000_000, "house1.png"),
+    7: ("house", "Коттедж в посёлке", 12_000_000, "house2.png"),
+    8: ("house", "Таунхаус", 22_000_000, "house3.png"),
+    9: ("house", "Загородный дом премиум-класса", 45_000_000, "house4.png"),
+    10: ("house", "Особняк с бассейном", 90_000_000, "house5.png"),
+
+    11: ("plane", "Cessna 172", 60_000_000, "plane1.png"),
+    12: ("plane", "Beechcraft King Air", 250_000_000, "plane2.png"),
+    13: ("plane", "Cessna Citation CJ4", 700_000_000, "plane3.png"),
+    14: ("plane", "Bombardier Challenger 350", 1_800_000_000, "plane4.png"),
+    15: ("plane", "Gulfstream G650", 4_500_000_000, "plane5.png"),
+
+    16: ("helicopter", "Robinson R44", 40_000_000, "heli1.png"),
+    17: ("helicopter", "Bell 407", 120_000_000, "heli2.png"),
+    18: ("helicopter", "Airbus H145", 350_000_000, "heli3.png"),
+    19: ("helicopter", "AgustaWestland AW139", 800_000_000, "heli4.png"),
+    20: ("helicopter", "Sikorsky S-92", 2_000_000_000, "heli5.png"),
+
+    21: ("boat", "Катер", 20_000_000, "07_boat.png"),
+    22: ("boat", "Яхта", 80_000_000, "09_yacht.png"),
+}
+
+
+# ---------- Cars (tiered garage — cosmetic status items) ----------
+# tier_key: (label, emoji)
+CAR_TIERS = {
+    "budget": ("Бюджет", "🚗"),
+    "mid": ("Средние", "🚙"),
+    "comfort": ("Комфорт", "🚘"),
+    "business": ("Бизнес", "🖤"),
+    "sport": ("Спорт", "🏎"),
+    "hyper": ("Гиперкар", "🏁"),
+}
+
+# id: (tier_key, model_name, price, image_filename)
+CARS = {
+    1:  ("budget", "Lada Granta", 700_000, "01_budget.png"),
+    2:  ("budget", "Renault Logan", 900_000, "02_budget.png"),
+    3:  ("budget", "Hyundai Solaris", 1_200_000, "03_budget.png"),
+    4:  ("budget", "Kia Rio", 1_300_000, "04_budget.png"),
+    5:  ("budget", "Volkswagen Polo", 1_500_000, "05_budget.png"),
+
+    6:  ("mid", "Skoda Octavia", 2_200_000, "06_mid.png"),
+    7:  ("mid", "Toyota Camry", 2_800_000, "07_mid.png"),
+    8:  ("mid", "Mazda 6", 2_500_000, "08_mid.png"),
+    9:  ("mid", "Volkswagen Passat", 2_600_000, "09_mid.png"),
+    10: ("mid", "Honda Accord", 2_900_000, "10_mid.png"),
+
+    11: ("comfort", "BMW 3 Series", 4_500_000, "11_comfort.png"),
+    12: ("comfort", "Mercedes-Benz C-Class", 4_800_000, "12_comfort.png"),
+    13: ("comfort", "Audi A4", 4_600_000, "13_comfort.png"),
+    14: ("comfort", "Lexus ES", 5_200_000, "14_comfort.png"),
+    15: ("comfort", "Volvo S60", 4_300_000, "15_comfort.png"),
+
+    16: ("business", "Mercedes-Benz S-Class", 12_000_000, "16_business.png"),
+    17: ("business", "BMW 7 Series", 11_500_000, "17_business.png"),
+    18: ("business", "Audi A8", 10_800_000, "18_business.png"),
+    19: ("business", "Genesis G90", 9_500_000, "19_business.png"),
+    20: ("business", "Bentley Flying Spur", 25_000_000, "20_business.png"),
+
+    21: ("sport", "Porsche 911", 15_000_000, "21_sport.png"),
+    22: ("sport", "Nissan GT-R", 14_000_000, "22_sport.png"),
+    23: ("sport", "BMW M4", 13_000_000, "23_sport.png"),
+    24: ("sport", "Chevrolet Corvette", 12_500_000, "24_sport.png"),
+    25: ("sport", "Audi RS7", 16_000_000, "25_sport.png"),
+
+    26: ("hyper", "Lamborghini Aventador", 45_000_000, "26_hyper.png"),
+    27: ("hyper", "Ferrari SF90", 55_000_000, "27_hyper.png"),
+    28: ("hyper", "McLaren 720S", 40_000_000, "28_hyper.png"),
+    29: ("hyper", "Bugatti Chiron", 250_000_000, "29_hyper.png"),
+    30: ("hyper", "Koenigsegg Jesko", 300_000_000, "30_hyper.png"),
+}

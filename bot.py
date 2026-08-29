@@ -9,6 +9,7 @@ from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
     BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats, BotCommandScopeChat,
+    FSInputFile, ChatPermissions, ChatMemberUpdated,
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -17,6 +18,10 @@ import database as db
 import games
 
 logging.basicConfig(level=logging.INFO)
+
+PROPERTY_ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "property")
+CARS_ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "cars")
+BUSINESS_ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "business")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "PUT_YOUR_TOKEN_HERE")
 
@@ -34,9 +39,6 @@ dp = Dispatcher()
 # active crash games: user_id -> dict(bet, multiplier, crash_point, cashed_out, task)
 active_crash = {}
 
-# active giveaway: chat_id -> dict(prize, participants:set, ends_task)
-active_giveaways = {}
-
 # active mines games: user_id -> dict(bet, mines, mine_positions, revealed, multiplier, chat_id, message_id)
 active_mines = {}
 
@@ -46,6 +48,10 @@ active_blackjack = {}
 # active lottery pools: chat_id -> dict(tickets: list[(user_id, amount)], message_id)
 active_lottery = {}
 
+# crypto: symbol -> max % swing per price-update tick (meme coins are more volatile)
+CRYPTO_VOLATILITY = {"BTC": 0.02, "ETH": 0.03, "TON": 0.04, "DOGE": 0.08}
+CRYPTO_UPDATE_INTERVAL_SECONDS = 60
+
 
 # ---------------- Slash-command menu (the list that pops up on "/") ----------------
 
@@ -53,27 +59,45 @@ BASE_COMMANDS = [
     BotCommand(command="start", description="Начать / приветствие"),
     BotCommand(command="balance", description="Баланс"),
     BotCommand(command="daily", description="Ежедневный бонус"),
-    BotCommand(command="work", description="Поработать за тенге"),
-    BotCommand(command="pay", description="Перевести тенге игроку"),
+    BotCommand(command="work", description="Поработать за деньги"),
+    BotCommand(command="pay", description="Перевести баланс игроку"),
+    BotCommand(command="bills", description="Мои счета (коммуналка/налог)"),
+    BotCommand(command="paybills", description="Оплатить счета"),
+    BotCommand(command="deposit", description="Открыть вклад"),
+    BotCommand(command="deposits", description="Мои вклады"),
+    BotCommand(command="withdraw", description="Забрать вклад"),
+    BotCommand(command="loan", description="Взять кредит"),
+    BotCommand(command="myloan", description="Мой кредит"),
+    BotCommand(command="repayloan", description="Погасить кредит"),
+    BotCommand(command="crypto", description="Курсы криптовалют"),
+    BotCommand(command="buycrypto", description="Купить крипту"),
+    BotCommand(command="sellcrypto", description="Продать крипту"),
+    BotCommand(command="mycrypto", description="Мой крипто-портфель"),
     BotCommand(command="mystats", description="Моя статистика"),
-    BotCommand(command="top", description="Топ игроков"),
+    BotCommand(command="nik", description="Установить ник"),
+    BotCommand(command="forbes", description="Топ 100 по капиталу (всё имущество)"),
+    BotCommand(command="richlist", description="Рейтинг всех игроков"),
+    BotCommand(command="tops", description="Топ игроков"),
     BotCommand(command="myid", description="Мой Telegram ID"),
     BotCommand(command="channel", description="Наш канал"),
+    BotCommand(command="currencies", description="Список доступных валют"),
     BotCommand(command="coinflip", description="Орёл/решка"),
     BotCommand(command="dice", description="Кости"),
     BotCommand(command="slots", description="Слот-машина"),
     BotCommand(command="roulette", description="Рулетка"),
-    BotCommand(command="rps", description="Камень-ножницы-бумага"),
     BotCommand(command="wheel", description="Колесо фортуны"),
-    BotCommand(command="keno", description="Кено"),
     BotCommand(command="mines", description="Мины"),
     BotCommand(command="blackjack", description="Блэкджек (21)"),
-    BotCommand(command="hl", description="Больше/меньше карты"),
+    BotCommand(command="trade", description="Трейд верх/вниз"),
     BotCommand(command="crash", description="Крэш-график"),
     BotCommand(command="lottery", description="Лотерея (общий банк)"),
-    BotCommand(command="plinko", description="Плинко"),
-    BotCommand(command="baccarat", description="Баккара"),
-    BotCommand(command="roll", description="Просто бросить кубик"),
+    BotCommand(command="business", description="Магазин бизнесов"),
+    BotCommand(command="mybiz", description="Мои бизнесы"),
+    BotCommand(command="collect", description="Собрать доход с бизнесов"),
+    BotCommand(command="property", description="Каталог имущества"),
+    BotCommand(command="myproperty", description="Моё имущество"),
+    BotCommand(command="cars", description="Гараж — категории машин"),
+    BotCommand(command="mycars", description="Мой гараж"),
 ]
 
 GROUP_ONLY_COMMANDS = [
@@ -82,34 +106,53 @@ GROUP_ONLY_COMMANDS = [
 ]
 
 ADMIN_COMMANDS = [
-    BotCommand(command="give", description="[admin] Выдать тенге"),
-    BotCommand(command="take", description="[admin] Списать тенге"),
-    BotCommand(command="setbalance", description="[admin] Выставить баланс"),
-    BotCommand(command="resetuser", description="[admin] Сбросить баланс игрока"),
-    BotCommand(command="ban", description="[admin] Заблокировать игрока"),
-    BotCommand(command="unban", description="[admin] Разблокировать игрока"),
+    BotCommand(command="botban", description="[admin] Заблокировать в боте (не в группе)"),
+    BotCommand(command="unbotban", description="[admin] Разблокировать в боте"),
     BotCommand(command="userinfo", description="[admin] Инфо об игроке"),
     BotCommand(command="stats", description="[admin] Статистика бота"),
-    BotCommand(command="groupgive", description="[admin] Раздать тенге всем в чате"),
     BotCommand(command="groupinfo", description="[admin] Инфо о группе"),
     BotCommand(command="broadcast", description="[admin] Рассылка всем игрокам"),
-    BotCommand(command="giveaway", description="[admin] Запустить розыгрыш"),
-    BotCommand(command="endgiveaway", description="[admin] Досрочно завершить розыгрыш"),
     BotCommand(command="economy", description="[admin] Настройки экономики"),
     BotCommand(command="admins", description="[admin] Список админов и владельца"),
+    BotCommand(command="mute", description="[admin] Замутить в группе"),
+    BotCommand(command="unmute", description="[admin] Размутить в группе"),
+    BotCommand(command="warn", description="[admin] Выдать предупреждение"),
+    BotCommand(command="unwarn", description="[admin] Снять предупреждение"),
+    BotCommand(command="warns", description="[admin] Список предупреждений"),
+    BotCommand(command="ban", description="[admin] Забанить из группы"),
+    BotCommand(command="unban", description="[admin] Разбанить в группе"),
+    BotCommand(command="kick", description="[admin] Кикнуть из группы"),
 ]
 
 OWNER_COMMANDS = [
+    BotCommand(command="give", description="[owner] Начислить/списать баланс"),
+    BotCommand(command="take", description="[owner] Списать баланс (штраф)"),
+    BotCommand(command="setbalance", description="[owner] Жёстко выставить баланс"),
+    BotCommand(command="resetuser", description="[owner] Сбросить баланс игрока"),
     BotCommand(command="addadmin", description="[owner] Назначить админа"),
     BotCommand(command="removeadmin", description="[owner] Снять админа"),
     BotCommand(command="setminbet", description="[owner] Мин. ставка"),
     BotCommand(command="setmaxbet", description="[owner] Макс. ставка"),
     BotCommand(command="setdailybonus", description="[owner] Базовый дневной бонус"),
     BotCommand(command="setstartbalance", description="[owner] Стартовый баланс новых игроков"),
+    BotCommand(command="setcurrency", description="[owner] Сменить валюту"),
     BotCommand(command="setlotteryduration", description="[owner] Длительность раунда лотереи"),
     BotCommand(command="setlotteryedge", description="[owner] Комиссия лотереи"),
+    BotCommand(command="setcoinflipedge", description="[owner] Хаус-эдж coinflip/dice"),
+    BotCommand(command="setbetlimit", description="[owner] Лимит ставки как % от баланса"),
+    BotCommand(command="setmaxpayout", description="[owner] Макс. выигрыш за раунд"),
+    BotCommand(command="setbizcap", description="[owner] Лимит одного бизнеса в руки"),
     BotCommand(command="setworkreward", description="[owner] Награда за /work"),
     BotCommand(command="setworkcooldown", description="[owner] Кулдаун /work"),
+    BotCommand(command="settaxrate", description="[owner] Ставка коммуналки"),
+    BotCommand(command="setcartaxrate", description="[owner] Ставка транспортного налога"),
+    BotCommand(command="setbiztax", description="[owner] Налог на бизнес"),
+    BotCommand(command="setbillsthreshold", description="[owner] Порог блокировки при долге"),
+    BotCommand(command="setloanmax", description="[owner] Макс. сумма кредита"),
+    BotCommand(command="setloanrate", description="[owner] Ставка по кредиту"),
+    BotCommand(command="setwarnthreshold", description="[owner] Лимит предупреждений"),
+    BotCommand(command="setwarnaction", description="[owner] Санкция за лимит варнов"),
+    BotCommand(command="setmutetime", description="[owner] Мут по умолчанию"),
     BotCommand(command="resetalleconomy", description="[owner] Сбросить баланс всем игрокам"),
 ]
 
@@ -153,6 +196,25 @@ def is_owner(user_id: int) -> bool:
     return user_id == OWNER_ID
 
 
+async def is_telegram_group_admin(chat_id: int, user_id: int) -> bool:
+    """Checks the user's REAL Telegram admin status in this specific group (creator/administrator),
+    independent of the bot's own admin list. Used to gate moderation commands so any group's own
+    admins can moderate their chat without needing to be added as a bot admin."""
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        return member.status in ("administrator", "creator")
+    except Exception:
+        return False
+
+
+async def can_moderate(message: Message) -> bool:
+    """True if the caller may use /mute, /warn, /ban etc. — either a bot-level admin/owner,
+    or a real Telegram admin of this specific group."""
+    if is_admin(message.from_user.id):
+        return True
+    return await is_telegram_group_admin(message.chat.id, message.from_user.id)
+
+
 class GroupTrackerMiddleware(BaseMiddleware):
     """Remembers which users have been active in which group chats, for /grouptop."""
     async def __call__(self, handler, event: Message, data):
@@ -182,6 +244,35 @@ async def global_error_handler(event):
     return True  # mark as handled so the bot keeps polling instead of crashing
 
 
+# ---------------- Currency system (30 selectable currencies) ----------------
+
+CURRENCIES = {
+    "RUB": "₽", "USD": "$", "EUR": "€", "GBP": "£", "BTC": "₿",
+    "CENT": "¢", "JPY": "¥", "KZT": "₸", "UAH": "₴", "INR": "₹",
+    "KRW": "₩", "THB": "฿", "VND": "₫", "PHP": "₱", "TRY": "₺",
+    "ILS": "₪", "PLN": "zł", "CZK": "Kč", "HUF": "Ft", "SEK": "kr",
+    "CHF": "Fr", "BRL": "R$", "ARS": "$", "ZAR": "R", "NGN": "₦",
+    "GHS": "₵", "AZN": "₼", "GEL": "₾", "AMD": "֏", "ETH": "Ξ",
+}
+
+
+def cur() -> str:
+    """Current currency symbol, owner-selectable via /setcurrency."""
+    code = db.get_setting("currency_code", "RUB")
+    return CURRENCIES.get(code, "₸")
+
+
+def cur_code() -> str:
+    return db.get_setting("currency_code", "RUB")
+
+
+def fmt(n) -> str:
+    """Formats a number with dots as thousand separators: 1000 -> '1.000', 1000000 -> '1.000.000'."""
+    n = int(n)
+    sign = "-" if n < 0 else ""
+    return sign + f"{abs(n):,}".replace(",", ".")
+
+
 def parse_bet(arg: str, balance: int) -> int | None:
     try:
         amount = int(arg)
@@ -189,9 +280,18 @@ def parse_bet(arg: str, balance: int) -> int | None:
         return None
     min_bet = int(db.get_setting("min_bet", 10))
     max_bet = int(db.get_setting("max_bet", 50000))
-    if amount < min_bet or amount > max_bet or amount > balance:
+    max_percent = float(db.get_setting("max_bet_percent_of_balance", 15))
+    table_limit = min(max_bet, int(balance * max_percent / 100))
+    if amount < min_bet or amount > table_limit or amount > balance:
         return None
     return amount
+
+
+def cap_win(amount: int) -> int:
+    """Real casinos cap the maximum payout on any single round — applied here so no lucky
+    spin turns a modest bet into an instant fortune."""
+    cap = int(db.get_setting("max_single_payout", 5_000_000))
+    return min(amount, cap)
 
 
 def parse_duration(text: str) -> int | None:
@@ -226,17 +326,59 @@ async def cmd_start(message: Message):
         elif is_admin(message.from_user.id):
             await set_admin_menu(message.from_user.id)
     await message.answer(
-        f"🎰 <b>Добро пожаловать в виртуальное казино!</b>\n\n"
-        f"Это чисто игровой бот — тенге не настоящая, вывести её нельзя.\n"
-        f"Стартовый баланс: <b>{user['balance']}</b> тенге ₸\n\n"
-        f"Игр много: /coinflip, /dice, /slots, /roulette, /rps, /wheel, /keno, /mines, "
-        f"/blackjack, /hl, /crash, /lottery — полный список с описанием открывается по кнопке "
-        f"<b>/</b> рядом с полем ввода.\n\n"
-        f"Полезное: /balance, /daily (бонус со стриком), /work (подработка), /pay (перевод тенге), "
-        f"/mystats, /top.\n"
-        f"В группах доступны /duel (вызов на дуэль) и /grouptop.",
+        f"✨ <b>Приветствую вас в симуляторе жизни от minta (maalavo)!</b> ✨\n\n"
+        f"Здесь вы сможете воплотить в реальность свои мечты, но только в Telegram.\n\n"
+        f"У вас есть возможность приобрести автомобили, самолеты, вертолеты, дома, "
+        f"квартиры, бизнесы, а также найти множество увлекательных занятий. "
+        f"Кроме того, вы можете играть в наше любимое казино и предаваться азарту.\n\n"
+        f"💳 Стартовый баланс: <b>{fmt(user['balance'])}</b> {cur()}\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🎮 <b>Казино:</b> /coinflip /dice /slots /roulette /wheel /mines /blackjack /trade /crash /lottery\n"
+        f"💰 <b>Экономика:</b> /balance /daily /work /pay /nik /mystats\n"
+        f"🏦 <b>Банк:</b> /deposit /loan /crypto\n"
+        f"🚗 <b>Имущество:</b> /cars /property /business\n"
+        f"🏆 <b>Топы:</b> /tops /forbes /richlist\n"
+        f"👥 <b>В группах:</b> /duel — дуэль с другим игроком, /grouptop — топ чата\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"Полный список команд с описанием — по кнопке <b>/</b> рядом с полем ввода.\n\n"
+        f"Надеюсь, вам понравится этот бот!\n"
+        f"С любовью, mint ❤️",
         reply_markup=channel_keyboard(),
     )
+
+
+GROUP_WELCOME_TEXT = (
+    "✨ <b>Приветствую вас в симуляторе жизни от minta (maalavo)!</b> ✨\n\n"
+    "Здесь вы сможете воплотить в реальность свои мечты, но только в Telegram.\n\n"
+    "У вас есть возможность приобрести автомобили, самолеты, вертолеты, дома, "
+    "квартиры, бизнесы, а также найти множество увлекательных занятий. "
+    "Кроме того, вы можете играть в наше любимое казино и предаваться азарту.\n\n"
+    "━━━━━━━━━━━━━━━\n"
+    "⚔️ /duel [ставка] — вызвать кого-то на дуэль (ответом на его сообщение)\n"
+    "🏆 /grouptop — топ игроков этого чата\n"
+    "🎰 /coinflip /dice /slots /roulette /wheel /mines /blackjack /trade /crash /lottery — все игры "
+    "работают и в группе тоже\n\n"
+    "🛡 Если тут есть админы группы — им уже доступна модерация: /mute /warn /ban /kick и т.д. "
+    "(права проверяются по реальному статусу админа в Telegram, отдельно настраивать не нужно).\n"
+    "Чтобы это работало — дайте боту права администратора с возможностью банить/ограничивать участников.\n"
+    "━━━━━━━━━━━━━━━\n\n"
+    "Полный список команд — по кнопке <b>/</b> рядом с полем ввода.\n\n"
+    "Надеюсь, вам понравится этот бот!\n"
+    "С любовью, mint ❤️"
+)
+
+
+@dp.my_chat_member()
+async def on_bot_membership_changed(event: ChatMemberUpdated):
+    if event.chat.type not in ("group", "supergroup"):
+        return
+    old_status = event.old_chat_member.status
+    new_status = event.new_chat_member.status
+    if old_status in ("left", "kicked") and new_status in ("member", "administrator"):
+        try:
+            await bot.send_message(event.chat.id, GROUP_WELCOME_TEXT, reply_markup=channel_keyboard())
+        except Exception:
+            pass  # bot may lack permission to post, e.g. if added without send rights
 
 
 @dp.message(Command("channel"))
@@ -253,7 +395,7 @@ async def cmd_balance(message: Message):
         role = " (админ)"
     else:
         role = ""
-    await message.answer(f"₸ Твой баланс{role}: <b>{user['balance']}</b> тенге")
+    await message.answer(f"{cur()} Твой баланс{role}: <b>{fmt(user['balance'])}</b> {cur()}")
 
 
 @dp.message(Command("myid"))
@@ -295,9 +437,9 @@ async def cmd_daily(message: Message):
     db.set_last_bonus(uid, now.isoformat())
     new_balance = db.get_balance(uid)
     await message.answer(
-        f"🎁 Ежедневный бонус получен: <b>+{bonus}</b> тенге!\n"
+        f"🎁 Ежедневный бонус получен: <b>+{fmt(bonus)}</b> {cur()}!\n"
         f"🔥 Серия: <b>{streak}</b> {'день' if streak == 1 else 'дней'} подряд\n"
-        f"Баланс: <b>{new_balance}</b> ₸\nПриходи через 24 часа, чтобы не сбить серию."
+        f"Баланс: <b>{fmt(new_balance)}</b> {cur()}\nПриходи через 24 часа, чтобы не сбить серию."
     )
 
 
@@ -317,16 +459,15 @@ async def cmd_work(message: Message):
             await message.answer(f"⏳ Ты уже поработал. Отдохни ещё <b>{minutes}м {seconds}с</b>.")
             return
 
-    work_min = int(db.get_setting("work_min", 50))
-    work_max = int(db.get_setting("work_max", 300))
-    reward = random.randint(work_min, work_max)
-    job = games.do_work()
+    pay_multiplier = float(db.get_setting("work_pay_multiplier", 1.0))
+    job, base_pay = games.do_work()
+    reward = int(base_pay * pay_multiplier)
 
     db.admin_add_balance(uid, reward)
     db.set_last_work(uid, now.isoformat())
     new_balance = db.get_balance(uid)
     await message.answer(
-        f"{job}\n💰 Заработал: <b>+{reward}</b> тенге\nБаланс: <b>{new_balance}</b> ₸\n"
+        f"{job}\n💰 Заработал: <b>+{fmt(reward)}</b> {cur()}\nБаланс: <b>{fmt(new_balance)}</b> {cur()}\n"
         f"Следующая работа через {cooldown_minutes} мин."
     )
 
@@ -338,7 +479,7 @@ async def cmd_mystats(message: Message):
         row = db.get_or_create_user(message.from_user.id, message.from_user.username or message.from_user.first_name)
     await message.answer(
         f"📊 <b>Твоя статистика</b>\n\n"
-        f"Баланс: <b>{row['balance']}</b> ₸\n"
+        f"Баланс: <b>{fmt(row['balance'])}</b> {cur()}\n"
         f"Сыграно игр: {row['games_played']}\n"
         f"Всего выиграно: {row['total_won']}\n"
         f"Всего проиграно: {row['total_lost']}\n"
@@ -346,13 +487,72 @@ async def cmd_mystats(message: Message):
     )
 
 
-@dp.message(Command("roll"))
-async def cmd_roll(message: Message):
-    await message.answer_dice(emoji="🎲")
+@dp.message(Command("nik", "nick"))
+async def cmd_nik(message: Message):
+    db.get_or_create_user(message.from_user.id, message.from_user.username or message.from_user.first_name)
+    nickname = message.text.partition(" ")[2].strip()
+    if not nickname:
+        current = db.get_nickname(message.from_user.id)
+        await message.answer(
+            f"Твой ник сейчас: <b>{current or '— не задан (используется @username)'}</b>\n\n"
+            f"Использование: <code>/nik [новый ник]</code>\nСбросить: <code>/nik сброс</code>"
+        )
+        return
+    if nickname.lower() in ("сброс", "reset", "off", "-"):
+        db.set_nickname(message.from_user.id, None)
+        await message.answer("✅ Ник сброшен, снова показывается @username.")
+        return
+    nickname = nickname.replace("<", "").replace(">", "").replace("&", "").replace("\n", " ")
+    if len(nickname) > 24:
+        await message.answer("Слишком длинный ник — максимум 24 символа.")
+        return
+    if len(nickname) < 2:
+        await message.answer("Слишком короткий ник — минимум 2 символа.")
+        return
+    db.set_nickname(message.from_user.id, nickname)
+    await message.answer(f"✅ Ник установлен: <b>{nickname}</b>\nБудет показываться в /tops, /grouptop, /forbes.")
 
 
-@dp.message(Command("top"))
-async def cmd_top(message: Message):
+def mention_link(user_id: int, name: str) -> str:
+    """Clickable link straight to the player's profile, even without a public @username."""
+    safe_name = name.replace("<", "").replace(">", "").replace("&", "")
+    return f'<a href="tg://user?id={user_id}">{safe_name}</a>'
+
+
+def display_name(row) -> str:
+    """Prefers the player's custom nickname (/nik) over their Telegram username."""
+    if row["nickname"]:
+        return row["nickname"]
+    return row["username"] or "Аноним"
+
+
+@dp.message(Command("tops"))
+async def cmd_tops(message: Message):
+    parts = message.text.split()
+    show_full = len(parts) == 2 and parts[1].lower() == "full"
+
+    if show_full:
+        if not is_admin(message.from_user.id):
+            await message.answer("Полный топ (с админами/владельцем) доступен только админам. "
+                                  "Обычный рейтинг — просто /tops.")
+            return
+        staff_ids = set(db.list_admins()) | ({OWNER_ID} if OWNER_ID else set())
+        rows = db.top_players_all(30)
+        if not rows:
+            await message.answer("Пока нет игроков.")
+            return
+        text = "🏆 <b>Полный топ (игроки + стафф):</b>\n\n"
+        for i, r in enumerate(rows, 1):
+            name = display_name(r)
+            tag = ""
+            if r["user_id"] == OWNER_ID:
+                tag = " 👑(владелец)"
+            elif r["user_id"] in staff_ids:
+                tag = " 🛡(админ)"
+            text += f"{i}. {mention_link(r['user_id'], name)} — {fmt(r['balance'])} {cur()}{tag}\n"
+        await message.answer(text, disable_web_page_preview=True)
+        return
+
     staff_ids = set(db.list_admins()) | ({OWNER_ID} if OWNER_ID else set())
     rows = db.top_players_excluding(staff_ids, 10)
     if not rows:
@@ -360,9 +560,9 @@ async def cmd_top(message: Message):
         return
     text = "🏆 <b>Топ игроков:</b>\n\n"
     for i, r in enumerate(rows, 1):
-        name = r["username"] or "Аноним"
-        text += f"{i}. {name} — {r['balance']} ₸\n"
-    await message.answer(text)
+        name = display_name(r)
+        text += f"{i}. {mention_link(r['user_id'], name)} — {fmt(r['balance'])} {cur()}\n"
+    await message.answer(text, disable_web_page_preview=True)
 
 
 # ---------------- Coinflip ----------------
@@ -380,12 +580,14 @@ async def cmd_coinflip(message: Message):
         return
     choice = parts[2].lower()
     win, label = games.play_coinflip(choice)
+    edge = float(db.get_setting("coinflip_dice_house_edge", 0.05))
     if win:
-        db.change_balance(user["user_id"], amount, won=True)
-        await message.answer(f"₸ Выпало: <b>{label}</b>\n✅ Ты выиграл <b>{amount}</b> тенге!")
+        profit = int(amount * (1 - edge))
+        db.change_balance(user["user_id"], profit, won=True)
+        await message.answer(f"🪙 Выпало: <b>{label}</b>\n✅ Ты выиграл <b>{fmt(profit)}</b> {cur()}!")
     else:
         db.change_balance(user["user_id"], -amount, won=False)
-        await message.answer(f"₸ Выпало: <b>{label}</b>\n❌ Ты проиграл <b>{amount}</b> тенге.")
+        await message.answer(f"🪙 Выпало: <b>{label}</b>\n❌ Ты проиграл <b>{fmt(amount)}</b> {cur()}.")
 
 
 # ---------------- Dice ----------------
@@ -402,12 +604,14 @@ async def cmd_dice(message: Message):
         await message.answer("Некорректная ставка (проверь баланс и сумму).")
         return
     win, roll = games.play_dice(parts[2].lower())
+    edge = float(db.get_setting("coinflip_dice_house_edge", 0.05))
     if win:
-        db.change_balance(user["user_id"], amount, won=True)
-        await message.answer(f"🎲 Выпало: <b>{roll}</b>\n✅ Ты выиграл <b>{amount}</b> тенге!")
+        profit = int(amount * (1 - edge))
+        db.change_balance(user["user_id"], profit, won=True)
+        await message.answer(f"🎲 Выпало: <b>{roll}</b>\n✅ Ты выиграл <b>{fmt(profit)}</b> {cur()}!")
     else:
         db.change_balance(user["user_id"], -amount, won=False)
-        await message.answer(f"🎲 Выпало: <b>{roll}</b>\n❌ Ты проиграл <b>{amount}</b> тенге.")
+        await message.answer(f"🎲 Выпало: <b>{roll}</b>\n❌ Ты проиграл <b>{fmt(amount)}</b> {cur()}.")
 
 
 # ---------------- Slots ----------------
@@ -426,12 +630,12 @@ async def cmd_slots(message: Message):
     reels, multiplier = games.spin_slots()
     reels_text = " | ".join(reels)
     if multiplier > 0:
-        winnings = int(amount * multiplier)
+        winnings = cap_win(int(amount * multiplier))
         db.change_balance(user["user_id"], winnings - amount, won=True)
-        await message.answer(f"🎰 [ {reels_text} ]\n✅ Множитель x{multiplier}! Выигрыш: <b>{winnings}</b> тенге")
+        await message.answer(f"🎰 [ {reels_text} ]\n✅ Множитель x{multiplier}! Выигрыш: <b>{fmt(winnings)}</b> {cur()}")
     else:
         db.change_balance(user["user_id"], -amount, won=False)
-        await message.answer(f"🎰 [ {reels_text} ]\n❌ Проигрыш <b>{amount}</b> тенге.")
+        await message.answer(f"🎰 [ {reels_text} ]\n❌ Проигрыш <b>{fmt(amount)}</b> {cur()}.")
 
 
 # ---------------- Roulette ----------------
@@ -458,46 +662,14 @@ async def cmd_roulette(message: Message):
     win, multiplier = games.check_roulette_win(bet, number, color)
     color_ru = {"red": "🔴 Красное", "black": "⚫ Чёрное", "green": "🟢 Зеро"}[color]
     if win:
-        winnings = int(amount * multiplier)
+        winnings = cap_win(int(amount * multiplier))
         db.change_balance(user["user_id"], winnings - amount, won=True)
         await message.answer(f"🎡 Выпало: <b>{number}</b> ({color_ru})\n"
-                              f"✅ Выигрыш x{multiplier}: <b>{winnings}</b> тенге!")
+                              f"✅ Выигрыш x{multiplier}: <b>{fmt(winnings)}</b> {cur()}!")
     else:
         db.change_balance(user["user_id"], -amount, won=False)
         await message.answer(f"🎡 Выпало: <b>{number}</b> ({color_ru})\n"
-                              f"❌ Проигрыш <b>{amount}</b> тенге.")
-
-
-# ---------------- Rock-Paper-Scissors ----------------
-
-RPS_RU = {"rock": "Камень 🪨", "paper": "Бумага 📄", "scissors": "Ножницы ✂️"}
-RPS_ALIASES = {"камень": "rock", "бумага": "paper", "ножницы": "scissors",
-               "rock": "rock", "paper": "paper", "scissors": "scissors"}
-
-
-@dp.message(Command("rps"))
-async def cmd_rps(message: Message):
-    user = db.get_or_create_user(message.from_user.id, message.from_user.username or message.from_user.first_name)
-    parts = message.text.split()
-    if len(parts) != 3 or parts[2].lower() not in RPS_ALIASES:
-        await message.answer("Использование: <code>/rps 100 rock</code> (rock/paper/scissors "
-                              "или камень/бумага/ножницы)")
-        return
-    amount = parse_bet(parts[1], user["balance"])
-    if amount is None:
-        await message.answer("Некорректная ставка (проверь баланс и сумму).")
-        return
-    choice = RPS_ALIASES[parts[2].lower()]
-    bot_choice, result = games.play_rps(choice)
-    text = f"Ты: {RPS_RU[choice]}\nБот: {RPS_RU[bot_choice]}\n\n"
-    if result == "win":
-        db.change_balance(user["user_id"], amount, won=True)
-        await message.answer(text + f"✅ Победа! Выигрыш: <b>{amount}</b> тенге")
-    elif result == "lose":
-        db.change_balance(user["user_id"], -amount, won=False)
-        await message.answer(text + f"❌ Проигрыш <b>{amount}</b> тенге.")
-    else:
-        await message.answer(text + "🤝 Ничья, ставка возвращена.")
+                              f"❌ Проигрыш <b>{fmt(amount)}</b> {cur()}.")
 
 
 # ---------------- Wheel of fortune ----------------
@@ -515,48 +687,12 @@ async def cmd_wheel(message: Message):
         return
     multiplier = games.spin_wheel()
     if multiplier > 0:
-        winnings = int(amount * multiplier)
+        winnings = cap_win(int(amount * multiplier))
         db.change_balance(user["user_id"], winnings - amount, won=(multiplier > 1))
-        await message.answer(f"🎡 Колесо остановилось на <b>x{multiplier}</b>!\nВыигрыш: <b>{winnings}</b> тенге")
+        await message.answer(f"🎡 Колесо остановилось на <b>x{multiplier}</b>!\nВыигрыш: <b>{fmt(winnings)}</b> {cur()}")
     else:
         db.change_balance(user["user_id"], -amount, won=False)
-        await message.answer(f"🎡 Колесо остановилось на <b>x0</b>...\n❌ Проигрыш <b>{amount}</b> тенге.")
-
-
-# ---------------- Keno ----------------
-
-@dp.message(Command("keno"))
-async def cmd_keno(message: Message):
-    user = db.get_or_create_user(message.from_user.id, message.from_user.username or message.from_user.first_name)
-    parts = message.text.split()
-    if len(parts) != 3:
-        await message.answer("Использование: <code>/keno 100 3,7,15</code> — ставка и от 1 до 4 чисел "
-                              "от 1 до 20 через запятую. Бот вытягивает 8 чисел, оплата по числу совпадений.")
-        return
-    amount = parse_bet(parts[1], user["balance"])
-    if amount is None:
-        await message.answer("Некорректная ставка (проверь баланс и сумму).")
-        return
-    try:
-        picks = [int(x) for x in parts[2].split(",")]
-    except ValueError:
-        await message.answer("Числа должны быть целыми, через запятую без пробелов, например 3,7,15.")
-        return
-    if not (1 <= len(picks) <= 4) or len(set(picks)) != len(picks) or any(not (1 <= p <= 20) for p in picks):
-        await message.answer("Выбери от 1 до 4 разных чисел в диапазоне 1-20.")
-        return
-
-    drawn, matches, multiplier = games.play_keno(picks)
-    drawn_str = ", ".join(str(x) for x in sorted(drawn))
-    if multiplier > 0:
-        winnings = int(amount * multiplier)
-        db.change_balance(user["user_id"], winnings - amount, won=True)
-        await message.answer(f"🎱 Выпало: {drawn_str}\nСовпадений: {matches}/{len(picks)}\n"
-                              f"✅ Выигрыш x{multiplier}: <b>{winnings}</b> тенге")
-    else:
-        db.change_balance(user["user_id"], -amount, won=False)
-        await message.answer(f"🎱 Выпало: {drawn_str}\nСовпадений: {matches}/{len(picks)}\n"
-                              f"❌ Проигрыш <b>{amount}</b> тенге.")
+        await message.answer(f"🎡 Колесо остановилось на <b>x0</b>...\n❌ Проигрыш <b>{fmt(amount)}</b> {cur()}.")
 
 
 # ---------------- Lottery pool (общий банк, шанс пропорционален ставке) ----------------
@@ -570,7 +706,7 @@ async def finish_lottery(chat_id: int):
     tickets = state["tickets"]
     pot = sum(amount for _, amount in tickets)
     house_edge = float(db.get_setting("lottery_house_edge", 0.05))
-    payout = int(pot * (1 - house_edge))
+    payout = cap_win(int(pot * (1 - house_edge)))
     winner_id = random.choices([uid for uid, _ in tickets], weights=[amt for _, amt in tickets], k=1)[0]
     db.admin_add_balance(winner_id, payout)
     try:
@@ -581,8 +717,8 @@ async def finish_lottery(chat_id: int):
     participants = len(set(uid for uid, _ in tickets))
     await bot.send_message(
         chat_id,
-        f"🎟 <b>Лотерея завершена!</b>\nУчастников: {participants}\nБанк: {pot} ₸\n"
-        f"🏆 Победитель: {winner_name}\nВыигрыш: <b>{payout}</b> тенге ₸"
+        f"🎟 <b>Лотерея завершена!</b>\nУчастников: {participants}\nБанк: {fmt(pot)} {cur()}\n"
+        f"🏆 Победитель: {winner_name}\nВыигрыш: <b>{fmt(payout)}</b> {cur()}"
     )
 
 
@@ -612,72 +748,17 @@ async def cmd_lottery(message: Message):
 
     if is_new_round:
         await message.answer(
-            f"🎟 <b>Новый розыгрыш лотереи начат!</b>\nТвой билет: {amount}\nБанк: {pot} ₸\n"
+            f"🎟 <b>Новый розыгрыш лотереи начат!</b>\nТвой билет: {fmt(amount)} {cur()}\nБанк: {fmt(pot)} {cur()}\n"
             f"Покупай билет командой <code>/lottery [сумма]</code>. Итоги через {duration} сек."
         )
         asyncio.create_task(_lottery_timer(chat_id, duration))
     else:
-        await message.answer(f"🎟 Билет куплен: {amount}. Текущий банк: <b>{pot}</b> ₸")
+        await message.answer(f"🎟 Билет куплен: {fmt(amount)} {cur()}. Текущий банк: <b>{fmt(pot)}</b> {cur()}")
 
 
 async def _lottery_timer(chat_id: int, duration: int):
     await asyncio.sleep(duration)
     await finish_lottery(chat_id)
-
-
-# ---------------- Plinko ----------------
-
-@dp.message(Command("plinko"))
-async def cmd_plinko(message: Message):
-    user = db.get_or_create_user(message.from_user.id, message.from_user.username or message.from_user.first_name)
-    parts = message.text.split()
-    if len(parts) != 2:
-        await message.answer("Использование: <code>/plinko 100</code> — шарик падает вниз по доске, "
-                              "множитель зависит от того, в какую лунку он попадёт (края — редко, но x8).")
-        return
-    amount = parse_bet(parts[1], user["balance"])
-    if amount is None:
-        await message.answer("Некорректная ставка (проверь баланс и сумму).")
-        return
-    slot, multiplier = games.drop_plinko_ball()
-    board = " ".join("🔴" if i == slot else "⚪" for i in range(len(games.PLINKO_MULTIPLIERS)))
-    if multiplier > 0:
-        winnings = int(amount * multiplier)
-        db.change_balance(user["user_id"], winnings - amount, won=(multiplier >= 1))
-        await message.answer(f"🎯 {board}\nШарик попал в лунку x{multiplier}!\n"
-                              f"{'✅ Выигрыш' if multiplier >= 1 else '➖ Частичный возврат'}: <b>{winnings}</b> тенге")
-    else:
-        db.change_balance(user["user_id"], -amount, won=False)
-        await message.answer(f"🎯 {board}\n❌ Проигрыш <b>{amount}</b> тенге.")
-
-
-# ---------------- Baccarat ----------------
-
-@dp.message(Command("baccarat"))
-async def cmd_baccarat(message: Message):
-    user = db.get_or_create_user(message.from_user.id, message.from_user.username or message.from_user.first_name)
-    parts = message.text.split()
-    aliases = {"player": "player", "игрок": "player", "banker": "banker", "банкир": "banker",
-               "tie": "tie", "ничья": "tie"}
-    if len(parts) != 3 or parts[2].lower() not in aliases:
-        await message.answer("Использование: <code>/baccarat 100 player</code> (player/banker/tie) — "
-                              "ставка на игрока x2, на банкира x1.95, на ничью x8")
-        return
-    amount = parse_bet(parts[1], user["balance"])
-    if amount is None:
-        await message.answer("Некорректная ставка (проверь баланс и сумму).")
-        return
-    bet = aliases[parts[2].lower()]
-    player_val, banker_val, outcome = games.play_baccarat(bet)
-    text = f"🎴 Игрок: <b>{player_val}</b> | Банкир: <b>{banker_val}</b>\n\n"
-    if outcome == bet:
-        multiplier = {"player": 2.0, "banker": 1.95, "tie": 8.0}[bet]
-        winnings = int(amount * multiplier)
-        db.change_balance(user["user_id"], winnings - amount, won=True)
-        await message.answer(text + f"✅ Победил {outcome}! Выигрыш x{multiplier}: <b>{winnings}</b> тенге")
-    else:
-        db.change_balance(user["user_id"], -amount, won=False)
-        await message.answer(text + f"❌ Победил {outcome}. Проигрыш <b>{amount}</b> тенге.")
 
 
 # ---------------- Mines ----------------
@@ -730,7 +811,7 @@ async def cmd_mines(message: Message):
         "multiplier": 1.0,
     }
     sent = await message.answer(
-        f"💣 <b>Мины!</b>\nСтавка: {amount} | Мин на поле: {mines_count}\nМножитель: <b>x1.0</b>\n"
+        f"💣 <b>Мины!</b>\nСтавка: {fmt(amount)} | Мин на поле: {mines_count}\nМножитель: <b>x1.0</b>\n"
         f"Открывай клетки — чем больше открыл, тем выше множитель. Забери выигрыш вовремя!",
         reply_markup=mines_keyboard(uid),
     )
@@ -783,12 +864,12 @@ async def cb_mine_click(callback: CallbackQuery):
     total_cells = games.GRID_SIZE * games.GRID_SIZE
     if len(state["revealed"]) == total_cells - state["mines_count"]:
         # opened every safe cell — auto cash out
-        winnings = int(state["bet"] * state["multiplier"])
+        winnings = cap_win(int(state["bet"] * state["multiplier"]))
         db.change_balance(uid, winnings, won=True)
         active_mines.pop(uid, None)
         await bot.edit_message_text(
             chat_id=state["chat_id"], message_id=state["message_id"],
-            text=f"🏆 <b>Все безопасные клетки открыты!</b>\nВыигрыш x{state['multiplier']}: <b>{winnings}</b> тенге ₸",
+            text=f"🏆 <b>Все безопасные клетки открыты!</b>\nВыигрыш x{state['multiplier']}: <b>{fmt(winnings)}</b> {cur()}",
         )
         await callback.answer("Идеальная игра!")
         return
@@ -815,12 +896,12 @@ async def cb_mine_cashout(callback: CallbackQuery):
     if not state["revealed"]:
         await callback.answer("Открой хотя бы одну клетку перед тем, как забирать!", show_alert=True)
         return
-    winnings = int(state["bet"] * state["multiplier"])
+    winnings = cap_win(int(state["bet"] * state["multiplier"]))
     db.change_balance(uid, winnings, won=True)
     active_mines.pop(uid, None)
     await bot.edit_message_text(
         chat_id=state["chat_id"], message_id=state["message_id"],
-        text=f"✅ <b>Забрал на x{state['multiplier']}!</b>\nВыигрыш: <b>{winnings}</b> тенге ₸",
+        text=f"✅ <b>Забрал на x{state['multiplier']}!</b>\nВыигрыш: <b>{fmt(winnings)}</b> {cur()}",
     )
     await callback.answer("Забрал выигрыш!")
 
@@ -830,32 +911,33 @@ async def cb_noop(callback: CallbackQuery):
     await callback.answer()
 
 
-# ---------------- Higher / Lower ----------------
+# ---------------- Трейд верх/вниз ----------------
 
-@dp.message(Command("higherlower", "hl"))
-async def cmd_higherlower(message: Message):
+@dp.message(Command("trade"))
+async def cmd_trade(message: Message):
     user = db.get_or_create_user(message.from_user.id, message.from_user.username or message.from_user.first_name)
     parts = message.text.split()
-    aliases = {"higher": "higher", "больше": "higher", "lower": "lower", "меньше": "lower"}
+    aliases = {"up": "up", "вверх": "up", "down": "down", "вниз": "down"}
     if len(parts) != 3 or parts[2].lower() not in aliases:
-        await message.answer("Использование: <code>/hl 100 higher</code> (higher/lower или больше/меньше) — "
-                              "угадай, будет вторая карта больше или меньше первой")
+        await message.answer("Использование: <code>/trade 100 up</code> (up/down или вверх/вниз) — "
+                              "угадай, куда пойдёт цена дальше")
         return
     amount = parse_bet(parts[1], user["balance"])
     if amount is None:
         await message.answer("Некорректная ставка (проверь баланс и сумму).")
         return
     guess = aliases[parts[2].lower()]
-    first, second, outcome = games.play_higher_lower(guess)
-    text = f"Первая карта: <b>{first[0]}{first[1]}</b>\nВторая карта: <b>{second[0]}{second[1]}</b>\n\n"
+    price_before, price_after, outcome = games.play_trade(guess)
+    arrow = "📈" if price_after > price_before else ("📉" if price_after < price_before else "➡️")
+    text = f"Цена входа: <b>{price_before}</b> {cur()}\nЦена выхода: <b>{price_after}</b> {cur()} {arrow}\n\n"
     if outcome == "win":
         db.change_balance(user["user_id"], amount, won=True)
-        await message.answer(text + f"✅ Угадал! Выигрыш: <b>{amount}</b> тенге")
+        await message.answer(text + f"✅ Угадал направление! Выигрыш: <b>{fmt(amount)}</b> {cur()}")
     elif outcome == "lose":
         db.change_balance(user["user_id"], -amount, won=False)
-        await message.answer(text + f"❌ Не угадал. Проигрыш <b>{amount}</b> тенге.")
+        await message.answer(text + f"❌ Не угадал. Проигрыш <b>{fmt(amount)}</b> {cur()}.")
     else:
-        await message.answer(text + "🤝 Карты равны — ставка возвращена.")
+        await message.answer(text + "🤝 Цена не изменилась — ставка возвращена.")
 
 
 # ---------------- Blackjack (21) ----------------
@@ -894,18 +976,18 @@ async def resolve_blackjack(uid: int, chat_id: int, message_id: int):
     bet = state["bet"]
 
     if games.is_natural_blackjack(state["player"]) and not games.is_natural_blackjack(state["dealer"]):
-        winnings = int(bet * 2.5)
+        winnings = cap_win(int(bet * 2.5))
         db.change_balance(uid, winnings, won=True)
-        result = f"🏆 Блэкджек! Выигрыш x2.5: <b>{winnings}</b> тенге"
+        result = f"🏆 Блэкджек! Выигрыш x2.5: <b>{fmt(winnings)}</b> {cur()}"
     elif dealer_val > 21 or player_val > dealer_val:
-        winnings = bet * 2
+        winnings = cap_win(bet * 2)
         db.change_balance(uid, winnings, won=True)
-        result = f"✅ Победа! Выигрыш: <b>{winnings}</b> тенге"
+        result = f"✅ Победа! Выигрыш: <b>{fmt(winnings)}</b> {cur()}"
     elif player_val == dealer_val:
         db.change_balance(uid, bet)  # push, return the bet
         result = "🤝 Ничья, ставка возвращена."
     else:
-        result = f"❌ Дилер сильнее. Проигрыш <b>{bet}</b> тенге."
+        result = f"❌ Дилер сильнее. Проигрыш <b>{bet}</b> {cur()}."
 
     await bot.edit_message_text(chat_id=chat_id, message_id=message_id,
                                  text=blackjack_text(state, reveal_dealer=True) + f"\n\n{result}")
@@ -995,27 +1077,39 @@ async def cmd_crash(message: Message):
         await message.answer("У тебя уже есть активная игра в /crash!")
         return
     parts = message.text.split()
-    if len(parts) != 2:
-        await message.answer("Использование: <code>/crash 100</code>")
+    if len(parts) not in (2, 3):
+        await message.answer("Использование: <code>/crash 100</code> или с автозабором: "
+                              "<code>/crash 100 2.5</code> — заберёт сам на указанном множителе.")
         return
     amount = parse_bet(parts[1], user["balance"])
     if amount is None:
         await message.answer("Некорректная ставка (проверь баланс и сумму).")
         return
+    auto_cashout = None
+    if len(parts) == 3:
+        try:
+            auto_cashout = float(parts[2])
+        except ValueError:
+            await message.answer("Множитель автозабора должен быть числом, например 2.5.")
+            return
+        if auto_cashout < 1.01:
+            await message.answer("Множитель автозабора должен быть больше 1.01.")
+            return
 
     db.change_balance(uid, -amount)  # hold the bet upfront
     crash_point = games.generate_crash_point()
 
-    sent = await message.answer(
-        f"📈 <b>Крэш-график запущен!</b>\nСтавка: {amount}\nМножитель: <b>x1.00</b>\n\nЖми «Забрать», пока не рухнуло!",
-        reply_markup=crash_keyboard(uid),
-    )
+    intro = f"📈 <b>Крэш-график запущен!</b>\nСтавка: {fmt(amount)}\nМножитель: <b>x1.00</b>\n"
+    intro += f"Автозабор на x{auto_cashout}\n\n" if auto_cashout else "\n"
+    intro += "Жми «Забрать», пока не рухнуло!"
+    sent = await message.answer(intro, reply_markup=crash_keyboard(uid))
 
     state = {
         "bet": amount,
         "multiplier": 1.0,
         "crash_point": crash_point,
         "cashed_out": False,
+        "auto_cashout": auto_cashout,
         "chat_id": sent.chat.id,
         "message_id": sent.message_id,
     }
@@ -1028,19 +1122,33 @@ async def cmd_crash(message: Message):
                 state["multiplier"] = round(state["multiplier"] + random.uniform(0.05, 0.25) * state["multiplier"], 2)
                 if state["cashed_out"]:
                     return
+
+                if state["auto_cashout"] and state["multiplier"] >= state["auto_cashout"] \
+                        and state["multiplier"] < state["crash_point"]:
+                    state["cashed_out"] = True
+                    winnings = cap_win(int(state["bet"] * state["auto_cashout"]))
+                    db.change_balance(uid, winnings, won=True)
+                    active_crash.pop(uid, None)
+                    await bot.edit_message_text(
+                        chat_id=state["chat_id"], message_id=state["message_id"],
+                        text=(f"🤖 <b>Автозабор на x{state['auto_cashout']}!</b>\n"
+                              f"Выигрыш: <b>{fmt(winnings)}</b> {cur()}"),
+                    )
+                    return
+
                 if state["multiplier"] >= state["crash_point"]:
                     await bot.edit_message_text(
                         chat_id=state["chat_id"],
                         message_id=state["message_id"],
                         text=(f"📉 <b>КРАХ на x{state['crash_point']}!</b>\n"
-                              f"Ставка {state['bet']} сгорела. Не успел забрать 😢"),
+                              f"Ставка {fmt(state['bet'])} сгорела. Не успел забрать 😢"),
                     )
                     active_crash.pop(uid, None)
                     return
                 await bot.edit_message_text(
                     chat_id=state["chat_id"],
                     message_id=state["message_id"],
-                    text=(f"📈 <b>Крэш-график летит!</b>\nСтавка: {state['bet']}\n"
+                    text=(f"📈 <b>Крэш-график летит!</b>\nСтавка: {fmt(state['bet'])}\n"
                           f"Множитель: <b>x{state['multiplier']}</b>\n\nЖми «Забрать», пока не рухнуло!"),
                     reply_markup=crash_keyboard(uid),
                 )
@@ -1061,83 +1169,21 @@ async def cb_cashout(callback: CallbackQuery):
         await callback.answer("Игра уже завершена.", show_alert=True)
         return
     state["cashed_out"] = True
-    winnings = int(state["bet"] * state["multiplier"])
+    winnings = cap_win(int(state["bet"] * state["multiplier"]))
     db.change_balance(target_uid, winnings, won=True)
     active_crash.pop(target_uid, None)
     await bot.edit_message_text(
         chat_id=state["chat_id"],
         message_id=state["message_id"],
         text=(f"✅ <b>Забрал на x{state['multiplier']}!</b>\n"
-              f"Выигрыш: <b>{winnings}</b> тенге ₸"),
+              f"Выигрыш: <b>{fmt(winnings)}</b> {cur()}"),
     )
     await callback.answer("Успел забрать!")
 
 
-# ---------------- Admin: give currency ----------------
-
-@dp.message(Command("give"))
-async def cmd_give(message: Message):
-    if not is_admin(message.from_user.id):
-        return  # silently ignore for non-admins
-    parts = message.text.split()
-    if len(parts) != 3:
-        await message.answer("Использование: <code>/give [user_id] [сумма]</code>\n"
-                              "Сумма может быть отрицательной, чтобы забрать тенге.")
-        return
-    try:
-        target_id = int(parts[1])
-        amount = int(parts[2])
-    except ValueError:
-        await message.answer("user_id и сумма должны быть числами.")
-        return
-    if not db.user_exists(target_id):
-        await message.answer("Такого пользователя нет в базе (он ещё не запускал /start у бота).")
-        return
-    db.admin_add_balance(target_id, amount)
-    new_balance = db.get_balance(target_id)
-    await message.answer(f"✅ Игроку <code>{target_id}</code> начислено {amount}. Новый баланс: {new_balance}")
-    try:
-        sign = "➕" if amount >= 0 else "➖"
-        await bot.send_message(target_id, f"{sign} Администратор изменил твой баланс на {amount}.\n"
-                                           f"Текущий баланс: <b>{new_balance}</b> ₸")
-    except Exception:
-        pass  # user may have blocked the bot
-
-
-@dp.message(Command("take"))
-async def cmd_take(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-    parts = message.text.split()
-    if len(parts) != 3:
-        await message.answer("Использование: <code>/take [user_id] [сумма]</code> — списать тенге у игрока "
-                              "(сумма всегда положительная; если у игрока меньше — спишется весь баланс).")
-        return
-    try:
-        target_id = int(parts[1])
-        amount = int(parts[2])
-    except ValueError:
-        await message.answer("user_id и сумма должны быть числами.")
-        return
-    if amount <= 0:
-        await message.answer("Сумма списания должна быть положительной.")
-        return
-    if not db.user_exists(target_id):
-        await message.answer("Такого пользователя нет в базе.")
-        return
-    removed = db.take_balance(target_id, amount)
-    new_balance = db.get_balance(target_id)
-    await message.answer(f"✅ У игрока <code>{target_id}</code> списано {removed} тенге. Баланс: {new_balance}")
-    try:
-        await bot.send_message(target_id, f"➖ Администратор списал <b>{removed}</b> тенге.\n"
-                                           f"Текущий баланс: <b>{new_balance}</b> ₸")
-    except Exception:
-        pass
-
-
 @dp.message(Command("resetuser"))
 async def cmd_resetuser(message: Message):
-    if not is_admin(message.from_user.id):
+    if not is_owner(message.from_user.id):
         return
     parts = message.text.split()
     if len(parts) != 2:
@@ -1154,11 +1200,11 @@ async def cmd_resetuser(message: Message):
         return
     start = int(db.get_setting("start_balance", db.START_BALANCE))
     db.set_balance(target_id, start)
-    await message.answer(f"✅ Баланс игрока <code>{target_id}</code> сброшен до {start} тенге.")
+    await message.answer(f"✅ Баланс игрока <code>{target_id}</code> сброшен до {fmt(start)} {cur()}.")
 
 
-@dp.message(Command("ban"))
-async def cmd_ban(message: Message):
+@dp.message(Command("botban"))
+async def cmd_botban(message: Message):
     if not is_admin(message.from_user.id):
         return
     parts = message.text.split()
@@ -1172,23 +1218,24 @@ async def cmd_ban(message: Message):
     elif message.reply_to_message and message.reply_to_message.from_user:
         target_id = message.reply_to_message.from_user.id
     else:
-        await message.answer("Использование: <code>/ban [user_id]</code> или ответом на сообщение игрока.")
+        await message.answer("Использование: <code>/botban [user_id]</code> или ответом на сообщение игрока.\n"
+                              "Блокирует использование бота (не то же самое, что /ban — тот банит из группы).")
         return
     if is_admin(target_id):
-        await message.answer("Нельзя забанить админа или владельца.")
+        await message.answer("Нельзя заблокировать админа или владельца.")
         return
     db.get_or_create_user(target_id, str(target_id))
     db.set_banned(target_id, True)
-    await message.answer(f"🚫 Игрок <code>{target_id}</code> заблокирован.")
+    await message.answer(f"🚫 Игрок <code>{target_id}</code> больше не может пользоваться ботом.")
 
 
-@dp.message(Command("unban"))
-async def cmd_unban(message: Message):
+@dp.message(Command("unbotban"))
+async def cmd_unbotban(message: Message):
     if not is_admin(message.from_user.id):
         return
     parts = message.text.split()
     if len(parts) != 2:
-        await message.answer("Использование: <code>/unban [user_id]</code>")
+        await message.answer("Использование: <code>/unbotban [user_id]</code>")
         return
     try:
         target_id = int(parts[1])
@@ -1196,35 +1243,10 @@ async def cmd_unban(message: Message):
         await message.answer("user_id должен быть числом.")
         return
     db.set_banned(target_id, False)
-    await message.answer(f"✅ Игрок <code>{target_id}</code> разблокирован.")
+    await message.answer(f"✅ Игрок <code>{target_id}</code> снова может пользоваться ботом.")
 
 
-# ---------------- Admin: setbalance, userinfo, bot stats ----------------
-
-@dp.message(Command("setbalance"))
-async def cmd_setbalance(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-    parts = message.text.split()
-    if len(parts) != 3:
-        await message.answer("Использование: <code>/setbalance [user_id] [сумма]</code> — жёстко "
-                              "выставить баланс игрока (в отличие от /give, который добавляет/вычитает).")
-        return
-    try:
-        target_id = int(parts[1])
-        amount = int(parts[2])
-    except ValueError:
-        await message.answer("user_id и сумма должны быть числами.")
-        return
-    if amount < 0:
-        await message.answer("Баланс не может быть отрицательным.")
-        return
-    if not db.user_exists(target_id):
-        await message.answer("Такого пользователя нет в базе.")
-        return
-    db.set_balance(target_id, amount)
-    await message.answer(f"✅ Баланс игрока <code>{target_id}</code> выставлен в {amount}.")
-
+# ---------------- Admin: userinfo, bot stats ----------------
 
 @dp.message(Command("userinfo"))
 async def cmd_userinfo(message: Message):
@@ -1252,7 +1274,7 @@ async def cmd_userinfo(message: Message):
     await message.answer(
         f"👤 <b>Игрок {target_id}</b>\n"
         f"Ник: {row['username'] or '—'}\n"
-        f"Баланс: {row['balance']} ₸\n"
+        f"Баланс: {fmt(row['balance'])} {cur()}\n"
         f"Сыграно игр: {row['games_played']}\n"
         f"Выиграно всего: {row['total_won']}\n"
         f"Проиграно всего: {row['total_lost']}\n"
@@ -1270,35 +1292,9 @@ async def cmd_stats(message: Message):
     await message.answer(
         f"📈 <b>Статистика бота</b>\n\n"
         f"Всего игроков: {s['total_users']}\n"
-        f"Суммарный баланс в экономике: {s['total_balance']} ₸\n"
+        f"Суммарный баланс в экономике: {s['total_balance']} {cur()}\n"
         f"Всего сыграно игр: {s['total_games']}"
     )
-
-
-@dp.message(Command("groupgive"))
-async def cmd_groupgive(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-    if message.chat.type not in ("group", "supergroup"):
-        await message.answer("Эта команда работает только в групповых чатах.")
-        return
-    parts = message.text.split()
-    if len(parts) != 2:
-        await message.answer("Использование: <code>/groupgive [сумма]</code> — начислить всем известным "
-                              "игрокам этого чата.")
-        return
-    try:
-        amount = int(parts[1])
-    except ValueError:
-        await message.answer("Сумма должна быть числом.")
-        return
-    user_ids = db.get_group_user_ids(message.chat.id)
-    if not user_ids:
-        await message.answer("В этом чате пока нет отслеженных игроков.")
-        return
-    for uid in user_ids:
-        db.admin_add_balance(uid, amount)
-    await message.answer(f"✅ Начислено {amount} тенге {len(user_ids)} игрокам этого чата.")
 
 
 @dp.message(Command("groupinfo"))
@@ -1314,7 +1310,7 @@ async def cmd_groupinfo(message: Message):
         f"ℹ️ <b>Инфо о чате</b>\n\n"
         f"Chat ID: <code>{message.chat.id}</code>\n"
         f"Отслеженных игроков: {len(user_ids)}\n"
-        f"Их суммарный баланс: {total_balance} ₸"
+        f"Их суммарный баланс: {fmt(total_balance)} {cur()}"
     )
 
 
@@ -1341,14 +1337,6 @@ async def cmd_broadcast(message: Message):
     await status.edit_text(f"✅ Рассылка завершена.\nДоставлено: {sent}\nНе доставлено: {failed}")
 
 
-# ---------------- Admin: giveaway (розыгрыш) ----------------
-
-def giveaway_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎉 Участвовать", callback_data="giveaway_join")]
-    ])
-
-
 def format_duration(seconds: int) -> str:
     if seconds >= 86400 and seconds % 86400 == 0:
         return f"{seconds // 86400} д."
@@ -1359,114 +1347,830 @@ def format_duration(seconds: int) -> str:
     return f"{seconds} сек."
 
 
-@dp.message(Command("giveaway"))
-async def cmd_giveaway(message: Message):
-    if not is_admin(message.from_user.id):
+# ---------------- Businesses (passive income shop) ----------------
+
+@dp.message(Command("business", "shop"))
+async def cmd_business_shop(message: Message):
+    parts = message.text.split()
+    if len(parts) == 2 and parts[1].isdigit():
+        bid = int(parts[1])
+        if bid not in games.BUSINESSES:
+            await message.answer("Такого бизнеса нет. Список — просто /business.")
+            return
+        name, price, income, emoji, filename = games.BUSINESSES[bid]
+        path = os.path.join(BUSINESS_ASSETS_DIR, filename)
+        caption = (f"{emoji} <b>{name}</b>\nЦена: {fmt(price)} {cur()}\nДоход: {fmt(income)} {cur()}/ч\n\n"
+                   f"Купить: <code>/buybiz {bid}</code>")
+        if os.path.exists(path):
+            await message.answer_photo(FSInputFile(path), caption=caption)
+        else:
+            await message.answer(caption)
+        return
+
+    text = "🏪 <b>Магазин бизнесов</b> — пассивный доход в час\n\n"
+    for bid, (name, price, income, emoji, _) in games.BUSINESSES.items():
+        text += f"{bid}. {emoji} <b>{name}</b> — {fmt(price)} {cur()}, доход {fmt(income)}/ч\n"
+    text += (f"\nПосмотреть с фото: <code>/business [id]</code>\n"
+             f"Купить: <code>/buybiz [id] [кол-во]</code>\nСвои бизнесы: /mybiz\n"
+             f"Собрать доход: /collect (копится максимум {games.BUSINESS_MAX_ACCRUAL_HOURS}ч)")
+    await message.answer(text)
+
+
+@dp.message(Command("buybiz"))
+async def cmd_buybiz(message: Message):
+    user = db.get_or_create_user(message.from_user.id, message.from_user.username or message.from_user.first_name)
+    block_msg = await bills_block_message(user["user_id"])
+    if block_msg:
+        await message.answer(block_msg)
         return
     parts = message.text.split()
-    if len(parts) != 4:
-        await message.answer(
-            "Использование: <code>/giveaway [приз] [макс_участников] [время]</code>\n"
-            "Макс. участников: число, или <code>0</code> — без ограничения.\n"
-            "Время: секунды или с суффиксом s/m/h/d, например <code>30m</code>, <code>2h</code>, <code>1d</code>.\n"
-            "Пример: <code>/giveaway 1000 0 2h</code>"
-        )
+    if len(parts) not in (2, 3):
+        await message.answer("Использование: <code>/buybiz [id] [кол-во=1]</code>. Каталог — /business.")
         return
     try:
-        prize = int(parts[1])
-        max_participants = int(parts[2])
+        bid = int(parts[1])
+        qty = int(parts[2]) if len(parts) == 3 else 1
     except ValueError:
-        await message.answer("Приз и лимит участников должны быть числами.")
+        await message.answer("id и количество должны быть числами.")
         return
-    duration = parse_duration(parts[3])
-    if duration is None or duration <= 0:
-        await message.answer("Не понял время. Примеры: 30s, 10m, 2h, 1d, либо просто число секунд.")
+    if bid not in games.BUSINESSES or qty <= 0:
+        await message.answer("Такого бизнеса нет. Смотри каталог: /business.")
         return
-    if max_participants < 0:
-        await message.answer("Лимит участников не может быть отрицательным.")
+    max_qty = int(db.get_setting("business_max_quantity", 10))
+    existing = db.get_business_owned(user["user_id"], bid)
+    already_owned = existing["quantity"] if existing else 0
+    if already_owned + qty > max_qty:
+        await message.answer(f"Максимум {max_qty} единиц каждого бизнеса в одни руки "
+                              f"(у тебя уже {already_owned}). Реальная экономика — не бесконечный принтер.")
         return
+    name, price, income, emoji, filename = games.BUSINESSES[bid]
+    total_cost = price * qty
+    if total_cost > user["balance"]:
+        await message.answer(f"Не хватает средств. Нужно {fmt(total_cost)} {cur()}, у тебя {fmt(user['balance'])} {cur()}.")
+        return
+    db.change_balance(user["user_id"], -total_cost)
+    db.buy_business(user["user_id"], bid, qty, datetime.now(timezone.utc).isoformat())
+    path = os.path.join(BUSINESS_ASSETS_DIR, filename)
+    caption = f"✅ Куплено: {emoji} {name} ×{qty} за {fmt(total_cost)} {cur()}\nДоход теперь копится — забирай командой /collect."
+    if os.path.exists(path):
+        await message.answer_photo(FSInputFile(path), caption=caption)
+    else:
+        await message.answer(caption)
 
-    chat_id = message.chat.id
-    if chat_id in active_giveaways:
-        await message.answer("В этом чате уже идёт розыгрыш!")
-        return
 
-    cap_text = "без ограничения" if max_participants == 0 else str(max_participants)
-    sent = await message.answer(
-        f"🎉 <b>РОЗЫГРЫШ!</b>\nПриз: <b>{prize}</b> тенге ₸\nМест: {cap_text}\n"
-        f"Жми кнопку, чтобы участвовать!\nИтоги через {format_duration(duration)}.",
-        reply_markup=giveaway_keyboard(),
+@dp.message(Command("mybiz"))
+async def cmd_mybiz(message: Message):
+    user_id = message.from_user.id
+    db.get_or_create_user(user_id, message.from_user.username or message.from_user.first_name)
+    owned = db.get_user_businesses(user_id)
+    if not owned:
+        await message.answer("У тебя пока нет бизнесов. Загляни в /business.")
+        return
+    now = datetime.now(timezone.utc)
+    text = "🏪 <b>Твои бизнесы</b>\n\n"
+    total_pending = 0
+    for row in owned:
+        bid = row["business_id"]
+        if bid not in games.BUSINESSES:
+            continue
+        name, price, income, emoji, _ = games.BUSINESSES[bid]
+        last_collect = datetime.fromisoformat(row["last_collect"]) if row["last_collect"] else now
+        hours = min((now - last_collect).total_seconds() / 3600, games.BUSINESS_MAX_ACCRUAL_HOURS)
+        pending = int(income * row["quantity"] * hours)
+        total_pending += pending
+        text += f"{emoji} {name} ×{row['quantity']} — накопилось {fmt(pending)} {cur()}\n"
+    text += f"\n💰 Всего к сбору: <b>{fmt(total_pending)}</b> {cur()}\nСобрать: /collect"
+    await message.answer(text)
+
+
+@dp.message(Command("collect"))
+async def cmd_collect(message: Message):
+    user_id = message.from_user.id
+    db.get_or_create_user(user_id, message.from_user.username or message.from_user.first_name)
+    owned = db.get_user_businesses(user_id)
+    if not owned:
+        await message.answer("У тебя пока нет бизнесов. Загляни в /business.")
+        return
+    now = datetime.now(timezone.utc)
+    total_income = 0
+    for row in owned:
+        bid = row["business_id"]
+        if bid not in games.BUSINESSES:
+            continue
+        _, _, income, _, _ = games.BUSINESSES[bid]
+        last_collect = datetime.fromisoformat(row["last_collect"]) if row["last_collect"] else now
+        hours = min((now - last_collect).total_seconds() / 3600, games.BUSINESS_MAX_ACCRUAL_HOURS)
+        total_income += int(income * row["quantity"] * hours)
+        db.set_business_last_collect(user_id, bid, now.isoformat())
+    if total_income <= 0:
+        await message.answer("Пока нечего собирать — доход ещё не накопился.")
+        return
+    tax_percent = float(db.get_setting("business_tax_percent", 10))
+    tax = int(total_income * tax_percent / 100)
+    net_income = total_income - tax
+    db.admin_add_balance(user_id, net_income)
+    new_balance = db.get_balance(user_id)
+    await message.answer(
+        f"💰 Собрано: <b>{fmt(total_income)}</b> {cur()}\n"
+        f"📉 Налог на бизнес ({tax_percent:.0f}%): -{fmt(tax)} {cur()}\n"
+        f"✅ Начислено: <b>+{fmt(net_income)}</b> {cur()}\nБаланс: <b>{fmt(new_balance)}</b> {cur()}"
     )
-    active_giveaways[chat_id] = {
-        "prize": prize,
-        "participants": set(),
-        "max_participants": max_participants,
-        "message_id": sent.message_id,
+
+
+# ---------------- Property (real estate, aviation & watercraft) ----------------
+
+@dp.message(Command("property", "realestate"))
+async def cmd_property_shop(message: Message):
+    parts = message.text.split()
+    cat_aliases = {
+        "apartment": "apartment", "квартиры": "apartment", "квартира": "apartment",
+        "house": "house", "дома": "house", "дом": "house",
+        "plane": "plane", "самолеты": "plane", "самолёты": "plane", "самолет": "plane",
+        "helicopter": "helicopter", "вертолеты": "helicopter", "вертолёты": "helicopter",
+        "boat": "boat", "водный": "boat", "яхты": "boat",
     }
 
-    asyncio.create_task(_giveaway_timer(chat_id, duration))
-
-
-async def _giveaway_timer(chat_id: int, duration: int):
-    await asyncio.sleep(duration)
-    await finish_giveaway(chat_id)
-
-
-async def finish_giveaway(chat_id: int):
-    state = active_giveaways.pop(chat_id, None)
-    if state is None:
+    if len(parts) == 2 and parts[1].lower() in cat_aliases:
+        cat_key = cat_aliases[parts[1].lower()]
+        label, emoji = games.PROPERTY_CATEGORIES[cat_key]
+        text = f"{emoji} <b>{label}</b>\n\n"
+        for pid, (c, name, price, _) in games.PROPERTY.items():
+            if c == cat_key:
+                text += f"{pid}. {name} — {fmt(price)} {cur()}\n"
+        text += "\nПосмотреть с фото: <code>/property [id]</code>\nКупить: <code>/buyproperty [id]</code>"
+        await message.answer(text)
         return
-    participants = list(state["participants"])
-    if not participants:
-        await bot.send_message(chat_id, "🎉 Розыгрыш завершён — никто не участвовал 😢")
+
+    if len(parts) == 2 and parts[1].isdigit():
+        pid = int(parts[1])
+        if pid not in games.PROPERTY:
+            await message.answer("Такого объекта нет. Список категорий — просто /property.")
+            return
+        cat_key, name, price, filename = games.PROPERTY[pid]
+        label, emoji = games.PROPERTY_CATEGORIES[cat_key]
+        path = os.path.join(PROPERTY_ASSETS_DIR, filename)
+        caption = (f"{emoji} <b>{name}</b>\nКатегория: {label}\nЦена: {fmt(price)} {cur()}\n\n"
+                   f"Купить: <code>/buyproperty {pid}</code>")
+        if os.path.exists(path):
+            await message.answer_photo(FSInputFile(path), caption=caption)
+        else:
+            await message.answer(caption)
         return
-    winner_id = random.choice(participants)
-    db.admin_add_balance(winner_id, state["prize"])
-    try:
-        winner_chat = await bot.get_chat(winner_id)
-        winner_name = f"@{winner_chat.username}" if winner_chat.username else winner_chat.first_name
-    except Exception:
-        winner_name = str(winner_id)
-    await bot.send_message(
-        chat_id,
-        f"🎉 <b>Розыгрыш завершён!</b>\nУчастников: {len(participants)}\n"
-        f"Победитель: {winner_name}\nВыигрыш: <b>{state['prize']}</b> тенге ₸"
+
+    text = "🏘 <b>Имущество — категории</b>\n\n"
+    for cat_key, (label, emoji) in games.PROPERTY_CATEGORIES.items():
+        count = sum(1 for c, *_ in games.PROPERTY.values() if c == cat_key)
+        text += f"{emoji} <b>{label}</b> — {count}: <code>/property {cat_key}</code>\n"
+    text += "\nСвоё имущество: /myproperty"
+    await message.answer(text)
+
+
+@dp.message(Command("buyproperty"))
+async def cmd_buyproperty(message: Message):
+    user = db.get_or_create_user(message.from_user.id, message.from_user.username or message.from_user.first_name)
+    block_msg = await bills_block_message(user["user_id"])
+    if block_msg:
+        await message.answer(block_msg)
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Использование: <code>/buyproperty [id]</code>. Каталог — /property.")
+        return
+    pid = int(parts[1])
+    if pid not in games.PROPERTY:
+        await message.answer("Такого объекта нет. Смотри каталог: /property.")
+        return
+    cat_key, name, price, filename = games.PROPERTY[pid]
+    label, emoji = games.PROPERTY_CATEGORIES[cat_key]
+    if price > user["balance"]:
+        await message.answer(f"Не хватает средств. Нужно {fmt(price)} {cur()}, у тебя {fmt(user['balance'])} {cur()}.")
+        return
+    db.change_balance(user["user_id"], -price)
+    db.buy_property(user["user_id"], pid, 1)
+    path = os.path.join(PROPERTY_ASSETS_DIR, filename)
+    caption = f"🎉 Поздравляю с покупкой!\n{emoji} <b>{name}</b> ({label}) теперь твоё."
+    if os.path.exists(path):
+        await message.answer_photo(FSInputFile(path), caption=caption)
+    else:
+        await message.answer(caption)
+
+
+@dp.message(Command("myproperty"))
+async def cmd_myproperty(message: Message):
+    user_id = message.from_user.id
+    db.get_or_create_user(user_id, message.from_user.username or message.from_user.first_name)
+    owned = db.get_user_property(user_id)
+    if not owned:
+        await message.answer("У тебя пока нет имущества. Загляни в /property.")
+        return
+    text = "🏘 <b>Твоё имущество</b>\n\n"
+    total_value = 0
+    for row in owned:
+        pid = row["property_id"]
+        if pid not in games.PROPERTY:
+            continue
+        cat_key, name, price, _ = games.PROPERTY[pid]
+        label, emoji = games.PROPERTY_CATEGORIES[cat_key]
+        qty = row["quantity"]
+        total_value += price * qty
+        text += f"{emoji} {name} ({label})" + (f" ×{qty}" if qty > 1 else "") + "\n"
+    text += f"\n💎 Суммарная стоимость: <b>{fmt(total_value)}</b> {cur()}"
+    await message.answer(text)
+
+
+# ---------------- Cars (tiered garage) ----------------
+
+
+@dp.message(Command("cars"))
+async def cmd_cars(message: Message):
+    parts = message.text.split()
+    tier_aliases = {
+        "budget": "budget", "бюджет": "budget",
+        "mid": "mid", "средние": "mid", "средний": "mid",
+        "comfort": "comfort", "комфорт": "comfort",
+        "business": "business", "бизнес": "business",
+        "sport": "sport", "спорт": "sport",
+        "hyper": "hyper", "гиперкар": "hyper", "гипер": "hyper",
+    }
+
+    if len(parts) == 2 and parts[1].lower() in tier_aliases:
+        tier_key = tier_aliases[parts[1].lower()]
+        label, emoji = games.CAR_TIERS[tier_key]
+        text = f"{emoji} <b>Гараж — {label}</b>\n\n"
+        for cid, (t, model, price, _) in games.CARS.items():
+            if t == tier_key:
+                text += f"{cid}. {model} — {fmt(price)} {cur()}\n"
+        text += "\nПосмотреть с фото: <code>/car [id]</code>\nКупить: <code>/buycar [id]</code>"
+        await message.answer(text)
+        return
+
+    text = "🚘 <b>Гараж — категории</b>\n\n"
+    for tier_key, (label, emoji) in games.CAR_TIERS.items():
+        count = sum(1 for t, *_ in games.CARS.values() if t == tier_key)
+        text += f"{emoji} <b>{label}</b> — {count} машин: <code>/cars {tier_key}</code>\n"
+    text += "\nСвой гараж: /mycars"
+    await message.answer(text)
+
+
+@dp.message(Command("car"))
+async def cmd_car(message: Message):
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Использование: <code>/car [id]</code>. Список категорий — /cars.")
+        return
+    cid = int(parts[1])
+    if cid not in games.CARS:
+        await message.answer("Такой машины нет. Смотри /cars.")
+        return
+    tier_key, model, price, filename = games.CARS[cid]
+    label, emoji = games.CAR_TIERS[tier_key]
+    path = os.path.join(CARS_ASSETS_DIR, filename)
+    caption = (f"{emoji} <b>{model}</b>\nКатегория: {label}\nЦена: {fmt(price)} {cur()}\n\n"
+               f"Купить: <code>/buycar {cid}</code>")
+    if os.path.exists(path):
+        await message.answer_photo(FSInputFile(path), caption=caption)
+    else:
+        await message.answer(caption)
+
+
+@dp.message(Command("buycar"))
+async def cmd_buycar(message: Message):
+    user = db.get_or_create_user(message.from_user.id, message.from_user.username or message.from_user.first_name)
+    block_msg = await bills_block_message(user["user_id"])
+    if block_msg:
+        await message.answer(block_msg)
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Использование: <code>/buycar [id]</code>. Каталог — /cars.")
+        return
+    cid = int(parts[1])
+    if cid not in games.CARS:
+        await message.answer("Такой машины нет. Смотри /cars.")
+        return
+    tier_key, model, price, filename = games.CARS[cid]
+    label, emoji = games.CAR_TIERS[tier_key]
+    if price > user["balance"]:
+        await message.answer(f"Не хватает средств. Нужно {fmt(price)} {cur()}, у тебя {fmt(user['balance'])} {cur()}.")
+        return
+    db.change_balance(user["user_id"], -price)
+    db.buy_car(user["user_id"], cid, 1)
+    path = os.path.join(CARS_ASSETS_DIR, filename)
+    caption = f"🎉 Поздравляю с покупкой!\n{emoji} <b>{model}</b> ({label}) теперь в твоём гараже."
+    if os.path.exists(path):
+        await message.answer_photo(FSInputFile(path), caption=caption)
+    else:
+        await message.answer(caption)
+
+
+@dp.message(Command("mycars"))
+async def cmd_mycars(message: Message):
+    user_id = message.from_user.id
+    db.get_or_create_user(user_id, message.from_user.username or message.from_user.first_name)
+    owned = db.get_user_cars(user_id)
+    if not owned:
+        await message.answer("В твоём гараже пока пусто. Загляни в /cars.")
+        return
+    text = "🚘 <b>Твой гараж</b>\n\n"
+    total_value = 0
+    for row in owned:
+        cid = row["car_id"]
+        if cid not in games.CARS:
+            continue
+        tier_key, model, price, _ = games.CARS[cid]
+        label, emoji = games.CAR_TIERS[tier_key]
+        qty = row["quantity"]
+        total_value += price * qty
+        text += f"{emoji} {model} ({label})" + (f" ×{qty}" if qty > 1 else "") + "\n"
+    text += f"\n💎 Суммарная стоимость гаража: <b>{fmt(total_value)}</b> {cur()}"
+    await message.answer(text)
+
+
+# ---------------- Forbes: net worth leaderboard (всё имущество считается) ----------------
+
+def compute_net_worth(user_id: int) -> int:
+    """Cash + businesses + property + cars + crypto, minus outstanding loan debt.
+    (Unpaid bills aren't subtracted here — /forbes ranks gross wealth, not day-to-day cashflow.)"""
+    net = db.get_balance(user_id)
+
+    for row in db.get_user_businesses(user_id):
+        bid = row["business_id"]
+        if bid in games.BUSINESSES:
+            _, price, _, _, _ = games.BUSINESSES[bid]
+            net += price * row["quantity"]
+
+    for row in db.get_user_property(user_id):
+        pid = row["property_id"]
+        if pid in games.PROPERTY:
+            _, _, price, _ = games.PROPERTY[pid]
+            net += price * row["quantity"]
+
+    for row in db.get_user_cars(user_id):
+        cid = row["car_id"]
+        if cid in games.CARS:
+            _, _, price, _ = games.CARS[cid]
+            net += price * row["quantity"]
+
+    for row in db.get_user_crypto_holdings(user_id):
+        price_row = db.get_crypto_price(row["symbol"])
+        if price_row:
+            net += int(row["amount"] * price_row["price"])
+
+    loan = db.get_active_loan(user_id)
+    if loan:
+        net -= loan["remaining_debt"]
+
+    return net
+
+
+@dp.message(Command("forbes"))
+async def cmd_forbes(message: Message):
+    staff_ids = set(db.list_admins()) | ({OWNER_ID} if OWNER_ID else set())
+    rows = db.get_all_users_full()
+    ranked = []
+    for row in rows:
+        if row["user_id"] in staff_ids:
+            continue  # staff wealth kept out of player rankings, same as /tops
+        ranked.append((row, compute_net_worth(row["user_id"])))
+    ranked.sort(key=lambda pair: pair[1], reverse=True)
+    top = ranked[:100]
+
+    if not top:
+        await message.answer("Пока нет игроков.")
+        return
+
+    text = "💎 <b>FORBES — топ 100 по капиталу</b>\n<i>(баланс + бизнесы + имущество + машины + крипта − кредиты)</i>\n\n"
+    lines = []
+    for i, (row, net) in enumerate(top, 1):
+        lines.append(f"{i}. {mention_link(row['user_id'], display_name(row))} — {fmt(net)} {cur()}")
+    text += "\n".join(lines)
+
+    # Telegram messages cap at 4096 chars — split into chunks if the list is long
+    if len(text) <= 4000:
+        await message.answer(text, disable_web_page_preview=True)
+    else:
+        header = "💎 <b>FORBES — топ 100 по капиталу</b>\n\n"
+        chunk = header
+        for line in lines:
+            if len(chunk) + len(line) > 3800:
+                await message.answer(chunk, disable_web_page_preview=True)
+                chunk = ""
+            chunk += line + "\n"
+        if chunk:
+            await message.answer(chunk, disable_web_page_preview=True)
+
+
+@dp.message(Command("richlist"))
+async def cmd_richlist(message: Message):
+    staff_ids = set(db.list_admins()) | ({OWNER_ID} if OWNER_ID else set())
+    parts = message.text.split()
+    page = 1
+    if len(parts) == 2 and parts[1].isdigit():
+        page = max(1, int(parts[1]))
+
+    rows = db.get_all_users_full()
+    ranked = []
+    for row in rows:
+        if row["user_id"] in staff_ids:
+            continue
+        ranked.append((row, compute_net_worth(row["user_id"])))
+    ranked.sort(key=lambda pair: pair[1], reverse=True)
+
+    page_size = 20
+    total_pages = max(1, (len(ranked) + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    start = (page - 1) * page_size
+    page_rows = ranked[start:start + page_size]
+
+    if not page_rows:
+        await message.answer("Пока нет игроков.")
+        return
+
+    text = f"📊 <b>Рейтинг всех игроков</b> — от богатых к бедным (стр. {page}/{total_pages})\n\n"
+    for i, (row, net) in enumerate(page_rows, start + 1):
+        text += f"{i}. {mention_link(row['user_id'], display_name(row))} — {fmt(net)} {cur()}\n"
+    if total_pages > 1:
+        text += f"\nСледующая страница: <code>/richlist {page + 1}</code>"
+    await message.answer(text, disable_web_page_preview=True)
+
+
+# ---------------- Bills & taxes (коммуналка, транспортный налог) ----------------
+
+def compute_unpaid_bills(user_id: int) -> tuple[int, dict]:
+    """Returns (total_unpaid, breakdown) where breakdown has keys 'property' and 'car'."""
+    last_paid_str = db.get_last_bills_paid(user_id)
+    now = datetime.now(timezone.utc)
+    if last_paid_str:
+        elapsed_hours = (now - datetime.fromisoformat(last_paid_str)).total_seconds() / 3600
+    else:
+        elapsed_hours = 0  # first-ever check — nothing owed yet, timer starts now
+    hours = min(elapsed_hours, games.BILLS_MAX_ACCRUAL_HOURS)
+
+    property_tax_rate = float(db.get_setting("property_tax_rate", 0.00001))
+    car_tax_rate = float(db.get_setting("car_tax_rate", 0.000005))
+
+    property_value = 0
+    for row in db.get_user_property(user_id):
+        pid = row["property_id"]
+        if pid in games.PROPERTY:
+            _, _, price, _ = games.PROPERTY[pid]
+            property_value += price * row["quantity"]
+
+    car_value = 0
+    for row in db.get_user_cars(user_id):
+        cid = row["car_id"]
+        if cid in games.CARS:
+            _, _, price, _ = games.CARS[cid]
+            car_value += price * row["quantity"]
+
+    property_bill = int(property_value * property_tax_rate * hours)
+    car_bill = int(car_value * car_tax_rate * hours)
+    return property_bill + car_bill, {"property": property_bill, "car": car_bill}
+
+
+async def bills_block_message(user_id: int) -> str | None:
+    """Returns a warning string if the user owes too much and should be blocked from
+    buying more property/cars/businesses, or None if they're clear to purchase."""
+    if db.get_last_bills_paid(user_id) is None:
+        return None
+    total, _ = compute_unpaid_bills(user_id)
+    threshold = int(db.get_setting("bills_block_threshold", 5000))
+    if total > threshold:
+        return (f"🧾 У тебя накопился долг по счетам: {fmt(total)} {cur()}.\n"
+                f"Сначала оплати /paybills, потом покупай новое.")
+    return None
+
+
+@dp.message(Command("bills"))
+async def cmd_bills(message: Message):
+    user_id = message.from_user.id
+    db.get_or_create_user(user_id, message.from_user.username or message.from_user.first_name)
+    if db.get_last_bills_paid(user_id) is None:
+        db.set_last_bills_paid(user_id, datetime.now(timezone.utc).isoformat())
+        await message.answer("💡 Счётчик коммуналки и транспортного налога запущен. "
+                              "Первый счёт придёт по мере накопления — проверяй командой /bills.")
+        return
+    total, breakdown = compute_unpaid_bills(user_id)
+    if total <= 0:
+        await message.answer("✅ Долгов нет — всё оплачено.")
+        return
+    await message.answer(
+        f"🧾 <b>Счета к оплате</b>\n\n"
+        f"🏠 Коммуналка (квартиры/дома/самолёты/вертолёты/водный транспорт): {fmt(breakdown['property'])} {cur()}\n"
+        f"🚗 Транспортный налог: {fmt(breakdown['car'])} {cur()}\n\n"
+        f"💰 Итого: <b>{fmt(total)}</b> {cur()}\nОплатить: /paybills"
     )
 
 
-@dp.callback_query(F.data == "giveaway_join")
-async def cb_giveaway_join(callback: CallbackQuery):
-    chat_id = callback.message.chat.id
-    state = active_giveaways.get(chat_id)
-    if state is None:
-        await callback.answer("Розыгрыш уже завершён.", show_alert=True)
+@dp.message(Command("paybills"))
+async def cmd_paybills(message: Message):
+    user = db.get_or_create_user(message.from_user.id, message.from_user.username or message.from_user.first_name)
+    user_id = user["user_id"]
+    if db.get_last_bills_paid(user_id) is None:
+        db.set_last_bills_paid(user_id, datetime.now(timezone.utc).isoformat())
+        await message.answer("Долгов пока нет — счётчик только что запущен.")
         return
-    if callback.from_user.id in state["participants"]:
-        await callback.answer("Ты уже участвуешь!")
+    total, breakdown = compute_unpaid_bills(user_id)
+    if total <= 0:
+        await message.answer("✅ Долгов нет — платить нечего.")
         return
-    cap = state["max_participants"]
-    if cap and len(state["participants"]) >= cap:
-        await callback.answer("Мест больше нет 😢", show_alert=True)
+    if total > user["balance"]:
+        await message.answer(f"❌ Не хватает средств на оплату счетов.\n"
+                              f"Нужно {fmt(total)} {cur()}, у тебя {fmt(user['balance'])} {cur()}.\n"
+                              f"Собери доход с бизнесов (/collect) или заработай (/work).")
         return
-    db.get_or_create_user(callback.from_user.id, callback.from_user.username or callback.from_user.first_name)
-    state["participants"].add(callback.from_user.id)
-    if cap and len(state["participants"]) >= cap:
-        # room filled — end the giveaway immediately instead of waiting for the timer
-        await callback.answer("Ты в деле! Мест больше нет — розыгрыш завершается 🎉")
-        await finish_giveaway(chat_id)
-        return
-    await callback.answer("Участвуешь в розыгрыше! 🎉")
+    db.change_balance(user_id, -total)
+    db.set_last_bills_paid(user_id, datetime.now(timezone.utc).isoformat())
+    new_balance = db.get_balance(user_id)
+    await message.answer(f"✅ Счета оплачены: <b>{fmt(total)}</b> {cur()}\nБаланс: <b>{fmt(new_balance)}</b> {cur()}")
 
 
-@dp.message(Command("endgiveaway"))
-async def cmd_endgiveaway(message: Message):
-    if not is_admin(message.from_user.id):
+# ---------------- Bank: deposits (вклады) ----------------
+
+DEPOSIT_TERMS = {"1d": (1, "deposit_rate_1d"), "7d": (7, "deposit_rate_7d"), "30d": (30, "deposit_rate_30d")}
+
+
+@dp.message(Command("deposit"))
+async def cmd_deposit(message: Message):
+    user = db.get_or_create_user(message.from_user.id, message.from_user.username or message.from_user.first_name)
+    parts = message.text.split()
+    if len(parts) != 3 or parts[2].lower() not in DEPOSIT_TERMS:
+        rates = ", ".join(f"{k} ({float(db.get_setting(v, 0)) * 100:.0f}%)" for k, v in DEPOSIT_TERMS.items())
+        await message.answer(f"Использование: <code>/deposit [сумма] [срок]</code>\nСроки и доходность: {rates}\n"
+                              f"Пример: <code>/deposit 10000 7d</code>")
         return
-    chat_id = message.chat.id
-    if chat_id not in active_giveaways:
-        await message.answer("В этом чате сейчас нет активного розыгрыша.")
+    try:
+        amount = int(parts[1])
+    except ValueError:
+        await message.answer("Сумма должна быть числом.")
         return
-    await finish_giveaway(chat_id)
+    if amount <= 0 or amount > user["balance"]:
+        await message.answer("Некорректная сумма (проверь баланс).")
+        return
+    term_days, rate_key = DEPOSIT_TERMS[parts[2].lower()]
+    rate = float(db.get_setting(rate_key, 0))
+
+    db.change_balance(user["user_id"], -amount)
+    now = datetime.now(timezone.utc)
+    deposit_id = db.create_deposit(user["user_id"], amount, rate, term_days, now.isoformat())
+    maturity = now + timedelta(days=term_days)
+    payout = int(amount * (1 + rate))
+    await message.answer(
+        f"🏦 <b>Вклад #{deposit_id} открыт</b>\nСумма: {fmt(amount)} {cur()}\nСтавка: {rate*100:.0f}% за {term_days} дн.\n"
+        f"Созреет: {maturity.strftime('%d.%m.%Y %H:%M')} UTC\nК получению при погашении: <b>{fmt(payout)}</b> {cur()}\n\n"
+        f"Забрать досрочно можно, но тогда сгорят проценты — вернётся только сумма вклада."
+    )
+
+
+@dp.message(Command("deposits"))
+async def cmd_deposits(message: Message):
+    user_id = message.from_user.id
+    db.get_or_create_user(user_id, message.from_user.username or message.from_user.first_name)
+    rows = db.get_active_deposits(user_id)
+    if not rows:
+        await message.answer("У тебя нет активных вкладов. Открыть: /deposit [сумма] [срок].")
+        return
+    now = datetime.now(timezone.utc)
+    text = "🏦 <b>Твои вклады</b>\n\n"
+    for row in rows:
+        created = datetime.fromisoformat(row["created_at"])
+        maturity = created + timedelta(days=row["term_days"])
+        payout = int(row["amount"] * (1 + row["rate"]))
+        status = "✅ созрел" if now >= maturity else f"⏳ до {maturity.strftime('%d.%m %H:%M')} UTC"
+        text += (f"#{row['id']} — {fmt(row['amount'])} {cur()} → {fmt(payout)} {cur()} "
+                 f"({row['rate']*100:.0f}%/{row['term_days']}д) {status}\n")
+    text += "\nЗабрать: <code>/withdraw [id]</code>"
+    await message.answer(text)
+
+
+@dp.message(Command("withdraw"))
+async def cmd_withdraw(message: Message):
+    user_id = message.from_user.id
+    db.get_or_create_user(user_id, message.from_user.username or message.from_user.first_name)
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Использование: <code>/withdraw [id]</code>. Список вкладов — /deposits.")
+        return
+    deposit_id = int(parts[1])
+    row = db.get_deposit(deposit_id)
+    if row is None or row["user_id"] != user_id or row["withdrawn"]:
+        await message.answer("Такого активного вклада нет.")
+        return
+    created = datetime.fromisoformat(row["created_at"])
+    maturity = created + timedelta(days=row["term_days"])
+    now = datetime.now(timezone.utc)
+    if now >= maturity:
+        payout = int(row["amount"] * (1 + row["rate"]))
+        db.admin_add_balance(user_id, payout)
+        db.mark_deposit_withdrawn(deposit_id)
+        await message.answer(f"✅ Вклад #{deposit_id} погашен: <b>{fmt(payout)}</b> {cur()} "
+                              f"(сумма + {row['rate']*100:.0f}% процентов)")
+    else:
+        db.admin_add_balance(user_id, row["amount"])
+        db.mark_deposit_withdrawn(deposit_id)
+        await message.answer(f"⚠️ Вклад #{deposit_id} закрыт досрочно. Проценты сгорели.\n"
+                              f"Возвращено: <b>{fmt(row['amount'])}</b> {cur()}")
+
+
+# ---------------- Bank: loans (кредиты) ----------------
+
+@dp.message(Command("loan"))
+async def cmd_loan(message: Message):
+    user = db.get_or_create_user(message.from_user.id, message.from_user.username or message.from_user.first_name)
+    user_id = user["user_id"]
+    if db.get_active_loan(user_id):
+        await message.answer("У тебя уже есть непогашенный кредит. Смотри /myloan.")
+        return
+    parts = message.text.split()
+    max_amount = int(db.get_setting("loan_max_amount", 50000))
+    if len(parts) != 2:
+        await message.answer(f"Использование: <code>/loan [сумма]</code> (максимум {fmt(max_amount)} {cur()})")
+        return
+    try:
+        amount = int(parts[1])
+    except ValueError:
+        await message.answer("Сумма должна быть числом.")
+        return
+    if amount <= 0 or amount > max_amount:
+        await message.answer(f"Сумма кредита должна быть от 1 до {fmt(max_amount)} {cur()}.")
+        return
+
+    rate = float(db.get_setting("loan_interest_rate", 0.15))
+    term_days = int(db.get_setting("loan_term_days", 7))
+    remaining_debt = int(amount * (1 + rate))
+    now = datetime.now(timezone.utc)
+    due_at = now + timedelta(days=term_days)
+
+    db.admin_add_balance(user_id, amount)
+    db.create_loan(user_id, amount, remaining_debt, now.isoformat(), due_at.isoformat())
+    await message.answer(
+        f"💳 <b>Кредит выдан:</b> {fmt(amount)} {cur()}\n"
+        f"К возврату: <b>{fmt(remaining_debt)}</b> {cur()} ({rate*100:.0f}% за {term_days} дн.)\n"
+        f"Срок: до {due_at.strftime('%d.%m.%Y %H:%M')} UTC\n"
+        f"Погасить: /repayloan [сумма]. Просрочка увеличивает долг!"
+    )
+
+
+@dp.message(Command("myloan"))
+async def cmd_myloan(message: Message):
+    user_id = message.from_user.id
+    db.get_or_create_user(user_id, message.from_user.username or message.from_user.first_name)
+    loan = db.get_active_loan(user_id)
+    if not loan:
+        await message.answer("У тебя нет активного кредита. Взять: /loan [сумма].")
+        return
+    due_at = datetime.fromisoformat(loan["due_at"])
+    now = datetime.now(timezone.utc)
+    overdue_debt = _apply_loan_penalty_if_overdue(user_id, loan)
+    status = "❌ ПРОСРОЧЕН" if now > due_at else f"до {due_at.strftime('%d.%m.%Y %H:%M')} UTC"
+    await message.answer(
+        f"💳 <b>Твой кредит</b>\nВыдано: {fmt(loan['principal'])} {cur()}\n"
+        f"Остаток долга: <b>{fmt(overdue_debt)}</b> {cur()}\nСрок: {status}\n\nПогасить: /repayloan [сумма]"
+    )
+
+
+def _apply_loan_penalty_if_overdue(user_id: int, loan) -> int:
+    """If the loan is past its due date, applies daily penalty interest and returns the updated debt."""
+    due_at = datetime.fromisoformat(loan["due_at"])
+    now = datetime.now(timezone.utc)
+    if now <= due_at:
+        return loan["remaining_debt"]
+    overdue_days = int((now - due_at).total_seconds() / 86400) + 1
+    penalty_rate = float(db.get_setting("loan_penalty_rate_per_day", 0.05))
+    new_debt = int(loan["remaining_debt"] * (1 + penalty_rate) ** overdue_days)
+    db.update_loan_debt(user_id, new_debt)
+    return new_debt
+
+
+@dp.message(Command("repayloan"))
+async def cmd_repayloan(message: Message):
+    user = db.get_or_create_user(message.from_user.id, message.from_user.username or message.from_user.first_name)
+    user_id = user["user_id"]
+    loan = db.get_active_loan(user_id)
+    if not loan:
+        await message.answer("У тебя нет активного кредита.")
+        return
+    debt = _apply_loan_penalty_if_overdue(user_id, loan)
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer(f"Использование: <code>/repayloan [сумма]</code>. Остаток долга: {fmt(debt)} {cur()}")
+        return
+    try:
+        amount = int(parts[1])
+    except ValueError:
+        await message.answer("Сумма должна быть числом.")
+        return
+    if amount <= 0:
+        await message.answer("Сумма должна быть положительной.")
+        return
+    if amount > user["balance"]:
+        await message.answer(f"Не хватает средств. У тебя {fmt(user['balance'])} {cur()}.")
+        return
+
+    payment = min(amount, debt)
+    db.change_balance(user_id, -payment)
+    new_debt = debt - payment
+    if new_debt <= 0:
+        db.close_loan(user_id)
+        await message.answer(f"✅ Кредит полностью погашен! Списано {fmt(payment)} {cur()}.")
+    else:
+        db.update_loan_debt(user_id, new_debt)
+        await message.answer(f"✅ Внесено {fmt(payment)} {cur()}. Остаток долга: <b>{fmt(new_debt)}</b> {cur()}")
+
+
+# ---------------- Crypto ----------------
+
+@dp.message(Command("crypto"))
+async def cmd_crypto(message: Message):
+    rows = db.get_all_crypto_prices()
+    text = "📈 <b>Курсы криптовалют</b>\n\n"
+    for row in rows:
+        change = ((row["price"] - row["prev_price"]) / row["prev_price"] * 100) if row["prev_price"] else 0
+        arrow = "🟢▲" if change > 0 else ("🔴▼" if change < 0 else "⚪")
+        text += f"{row['symbol']}: {fmt(round(row['price']))} {cur()} {arrow} {change:+.2f}%\n"
+    text += "\nКупить: <code>/buycrypto [монета] [сумма]</code>\nПродать: <code>/sellcrypto [монета] [кол-во|all]</code>\n" \
+            "Портфель: /mycrypto"
+    await message.answer(text)
+
+
+@dp.message(Command("buycrypto"))
+async def cmd_buycrypto(message: Message):
+    user = db.get_or_create_user(message.from_user.id, message.from_user.username or message.from_user.first_name)
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer("Использование: <code>/buycrypto BTC 10000</code> — купить крипты на указанную сумму.")
+        return
+    symbol = parts[1].upper()
+    price_row = db.get_crypto_price(symbol)
+    if price_row is None:
+        await message.answer("Такой монеты нет. Список — /crypto.")
+        return
+    try:
+        spend = int(parts[2])
+    except ValueError:
+        await message.answer("Сумма должна быть числом.")
+        return
+    if spend <= 0 or spend > user["balance"]:
+        await message.answer("Некорректная сумма (проверь баланс).")
+        return
+    coin_amount = spend / price_row["price"]
+    db.change_balance(user["user_id"], -spend)
+    db.upsert_crypto_buy(user["user_id"], symbol, coin_amount, price_row["price"])
+    await message.answer(f"✅ Куплено {coin_amount:.6f} {symbol} на {fmt(spend)} {cur()} "
+                          f"(курс {fmt(round(price_row['price']))} {cur()})")
+
+
+@dp.message(Command("sellcrypto"))
+async def cmd_sellcrypto(message: Message):
+    user_id = message.from_user.id
+    db.get_or_create_user(user_id, message.from_user.username or message.from_user.first_name)
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer("Использование: <code>/sellcrypto BTC 0.01</code> или <code>/sellcrypto BTC all</code>")
+        return
+    symbol = parts[1].upper()
+    holding = db.get_crypto_holding(user_id, symbol)
+    if holding is None or holding["amount"] <= 0:
+        await message.answer("У тебя нет этой монеты. Портфель — /mycrypto.")
+        return
+    price_row = db.get_crypto_price(symbol)
+    if parts[2].lower() == "all":
+        sell_amount = holding["amount"]
+    else:
+        try:
+            sell_amount = float(parts[2])
+        except ValueError:
+            await message.answer("Количество должно быть числом или 'all'.")
+            return
+    if sell_amount <= 0 or sell_amount > holding["amount"]:
+        await message.answer(f"У тебя есть только {holding['amount']:.6f} {symbol}.")
+        return
+    proceeds = int(sell_amount * price_row["price"])
+    db.crypto_sell(user_id, symbol, sell_amount)
+    db.admin_add_balance(user_id, proceeds)
+    await message.answer(f"✅ Продано {sell_amount:.6f} {symbol} за <b>{fmt(proceeds)}</b> {cur()}")
+
+
+@dp.message(Command("mycrypto"))
+async def cmd_mycrypto(message: Message):
+    user_id = message.from_user.id
+    db.get_or_create_user(user_id, message.from_user.username or message.from_user.first_name)
+    holdings = db.get_user_crypto_holdings(user_id)
+    if not holdings:
+        await message.answer("У тебя пока нет крипты. Купить: /buycrypto [монета] [сумма].")
+        return
+    text = "💼 <b>Твой крипто-портфель</b>\n\n"
+    total_value = 0
+    for row in holdings:
+        price_row = db.get_crypto_price(row["symbol"])
+        value = row["amount"] * price_row["price"]
+        total_value += value
+        pnl_percent = ((price_row["price"] - row["avg_price"]) / row["avg_price"] * 100) if row["avg_price"] else 0
+        pnl_sign = "🟢+" if pnl_percent >= 0 else "🔴"
+        text += (f"{row['symbol']}: {row['amount']:.6f} — {fmt(round(value))} {cur()} "
+                 f"({pnl_sign}{pnl_percent:.1f}%)\n")
+    text += f"\n💰 Итого: <b>{fmt(round(total_value))}</b> {cur()}"
+    await message.answer(text)
 
 
 # ---------------- Transfer currency between players ----------------
@@ -1490,7 +2194,7 @@ async def cmd_pay(message: Message):
                                   "или <code>/pay [user_id] 100</code>")
             return
         if target_user_obj.is_bot:
-            await message.answer("Нельзя перевести тенге боту.")
+            await message.answer("Нельзя перевести баланс боту.")
             return
         target_id = target_user_obj.id
         db.get_or_create_user(target_id, target_user_obj.username or target_user_obj.first_name)
@@ -1513,7 +2217,7 @@ async def cmd_pay(message: Message):
         amount_str = parts[2]
 
     if target_id == message.from_user.id:
-        await message.answer("Нельзя перевести тенге самому себе 🙂")
+        await message.answer("Нельзя перевести баланс самому себе 🙂")
         return
 
     try:
@@ -1522,10 +2226,10 @@ async def cmd_pay(message: Message):
         await message.answer("Сумма должна быть числом.")
         return
     if amount < MIN_TRANSFER:
-        await message.answer(f"Минимальная сумма перевода — {MIN_TRANSFER} тенге.")
+        await message.answer(f"Минимальная сумма перевода — {MIN_TRANSFER} {cur()}.")
         return
     if amount > sender["balance"]:
-        await message.answer("У тебя не хватает тенге для этого перевода.")
+        await message.answer("У тебя не хватает средств для этого перевода.")
         return
 
     db.change_balance(message.from_user.id, -amount)
@@ -1535,9 +2239,9 @@ async def cmd_pay(message: Message):
 
     if message.chat.type == "private":
         # DM-to-DM transfer: fine to notify the recipient in their own chat with the bot
-        await message.answer(f"✅ Переведено <b>{amount}</b> тенге ₸")
+        await message.answer(f"✅ Переведено <b>{fmt(amount)}</b> {cur()}")
         try:
-            await bot.send_message(target_id, f"💸 {sender_name} перевёл(а) тебе <b>{amount}</b> тенге ₸")
+            await bot.send_message(target_id, f"💸 {sender_name} перевёл(а) тебе <b>{fmt(amount)}</b> {cur()}")
         except Exception:
             pass  # recipient may have blocked the bot
     else:
@@ -1547,7 +2251,7 @@ async def cmd_pay(message: Message):
             recipient_name = f"@{recipient_chat.username}" if recipient_chat.username else recipient_chat.first_name
         except Exception:
             recipient_name = str(target_id)
-        await message.answer(f"✅ {sender_name} перевёл(а) {recipient_name} <b>{amount}</b> тенге ₸")
+        await message.answer(f"✅ {sender_name} перевёл(а) {recipient_name} <b>{fmt(amount)}</b> {cur()}")
 
 
 # ---------------- Group features: duels & group leaderboard ----------------
@@ -1564,14 +2268,14 @@ async def cmd_grouptop(message: Message):
         return
     text = "🏆 <b>Топ игроков этого чата:</b>\n\n"
     for i, r in enumerate(rows, 1):
-        name = r["username"] or "Аноним"
-        text += f"{i}. {name} — {r['balance']} ₸\n"
+        name = display_name(r)
+        text += f"{i}. {name} — {fmt(r['balance'])} {cur()}\n"
     await message.answer(text)
 
 
 def duel_keyboard(challenger_id: int, target_id: int, amount: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Принять", callback_data=f"duel_accept:{challenger_id}:{target_id}:{amount}"),
+        InlineKeyboardButton(text="✅ Принять", callback_data=f"duel_accept:{challenger_id}:{target_id}:{fmt(amount)}"),
         InlineKeyboardButton(text="❌ Отклонить", callback_data=f"duel_decline:{challenger_id}:{target_id}"),
     ]])
 
@@ -1607,7 +2311,7 @@ async def cmd_duel(message: Message):
 
     await message.answer(
         f"⚔️ <b>Вызов на дуэль!</b>\n"
-        f"{message.from_user.first_name} вызывает {opponent.first_name} на ставку <b>{amount}</b> тенге!\n"
+        f"{message.from_user.first_name} вызывает {opponent.first_name} на ставку <b>{fmt(amount)}</b> {cur()}!\n"
         f"Победитель определяется подбрасыванием монетки.",
         reply_markup=duel_keyboard(message.from_user.id, opponent.id, amount),
     )
@@ -1624,11 +2328,11 @@ async def cb_duel_accept(callback: CallbackQuery):
     challenger_balance = db.get_balance(challenger_id)
     target_balance = db.get_balance(target_id)
     if challenger_balance < amount:
-        await callback.message.edit_text("❌ У вызвавшего игрока больше не хватает тенге. Дуэль отменена.")
+        await callback.message.edit_text("❌ У вызвавшего игрока больше не хватает средств. Дуэль отменена.")
         await callback.answer()
         return
     if target_balance < amount:
-        await callback.answer(f"У тебя не хватает тенге для ставки {amount}!", show_alert=True)
+        await callback.answer(f"У тебя не хватает {cur()} для ставки {fmt(amount)}!", show_alert=True)
         return
 
     db.change_balance(challenger_id, -amount)
@@ -1646,7 +2350,7 @@ async def cb_duel_accept(callback: CallbackQuery):
         winner_name, loser_name = str(winner_id), str(loser_id)
 
     await callback.message.edit_text(
-        f"⚔️ <b>Дуэль завершена!</b>\n🏆 Победитель: {winner_name} (+{amount * 2} ₸)\n😢 Проигравший: {loser_name}"
+        f"⚔️ <b>Дуэль завершена!</b>\n🏆 Победитель: {winner_name} (+{amount * 2} {cur()})\n😢 Проигравший: {loser_name}"
     )
     await callback.answer("Монетка подброшена!")
 
@@ -1676,10 +2380,18 @@ async def cmd_economy(message: Message):
         f"Прибавка бонуса за день серии: {s.get('daily_streak_step')} (макс. {s.get('daily_streak_cap')} дней)\n"
         f"Мин. ставка: {s.get('min_bet')}\n"
         f"Макс. ставка: {s.get('max_bet')}\n"
+        f"Лимит стола: {s.get('max_bet_percent_of_balance')}% от баланса игрока\n"
+        f"Макс. выигрыш за раунд: {fmt(int(s.get('max_single_payout', 0)))} {cur()}\n"
+        f"Хаус-эдж coinflip/dice: {float(s.get('coinflip_dice_house_edge', 0)) * 100:.0f}%\n"
+        f"Лимит бизнеса одного типа: {s.get('business_max_quantity')} шт.\n"
         f"Длительность раунда лотереи: {s.get('lottery_duration_seconds')} сек.\n"
         f"Комиссия лотереи: {float(s.get('lottery_house_edge', 0)) * 100:.0f}%\n"
-        f"Награда /work: {s.get('work_min')}-{s.get('work_max')} тенге\n"
-        f"Кулдаун /work: {s.get('work_cooldown_minutes')} мин."
+        f"Множитель зарплат /work: x{s.get('work_pay_multiplier')}\n"
+        f"Кулдаун /work: {s.get('work_cooldown_minutes')} мин.\n"
+        f"Коммуналка (имущество): {float(s.get('property_tax_rate', 0)) * 100:.4f}%/час от стоимости\n"
+        f"Транспортный налог: {float(s.get('car_tax_rate', 0)) * 100:.4f}%/час от стоимости\n"
+        f"Налог на бизнес: {s.get('business_tax_percent')}% с /collect\n"
+        f"Порог блокировки при долге: {fmt(int(s.get('bills_block_threshold', 5000)))} {cur()}"
     )
 
 
@@ -1692,7 +2404,7 @@ async def cmd_setminbet(message: Message):
         await message.answer("Использование: <code>/setminbet [сумма]</code>")
         return
     db.set_setting("min_bet", int(parts[1]))
-    await message.answer(f"✅ Минимальная ставка теперь {parts[1]} тенге.")
+    await message.answer(f"✅ Минимальная ставка теперь {parts[1]} {cur()}.")
 
 
 @dp.message(Command("setmaxbet"))
@@ -1704,7 +2416,7 @@ async def cmd_setmaxbet(message: Message):
         await message.answer("Использование: <code>/setmaxbet [сумма]</code>")
         return
     db.set_setting("max_bet", int(parts[1]))
-    await message.answer(f"✅ Максимальная ставка теперь {parts[1]} тенге.")
+    await message.answer(f"✅ Максимальная ставка теперь {parts[1]} {cur()}.")
 
 
 @dp.message(Command("setdailybonus"))
@@ -1717,7 +2429,7 @@ async def cmd_setdailybonus(message: Message):
                               "(до прибавки за серию).")
         return
     db.set_setting("daily_bonus", int(parts[1]))
-    await message.answer(f"✅ Базовый ежедневный бонус теперь {parts[1]} тенге.")
+    await message.answer(f"✅ Базовый ежедневный бонус теперь {parts[1]} {cur()}.")
 
 
 @dp.message(Command("setstartbalance"))
@@ -1730,7 +2442,29 @@ async def cmd_setstartbalance(message: Message):
                               "новых игроков, у существующих баланс не меняется.")
         return
     db.set_setting("start_balance", int(parts[1]))
-    await message.answer(f"✅ Стартовый баланс новых игроков теперь {parts[1]} тенге.")
+    await message.answer(f"✅ Стартовый баланс новых игроков теперь {parts[1]} {cur()}.")
+
+
+@dp.message(Command("currencies"))
+async def cmd_currencies(message: Message):
+    lines = [f"{code} {symbol}" for code, symbol in CURRENCIES.items()]
+    columns = "\n".join(lines)
+    await message.answer(f"💱 <b>Доступные валюты</b> (сейчас: {cur_code()} {cur()})\n\n{columns}\n\n"
+                          f"Владелец меняет командой <code>/setcurrency [код]</code>, например "
+                          f"<code>/setcurrency USD</code>.")
+
+
+@dp.message(Command("setcurrency"))
+async def cmd_setcurrency(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or parts[1].upper() not in CURRENCIES:
+        await message.answer("Использование: <code>/setcurrency [код]</code>. Список кодов — /currencies.")
+        return
+    code = parts[1].upper()
+    db.set_setting("currency_code", code)
+    await message.answer(f"✅ Валюта теперь {code} {CURRENCIES[code]}")
 
 
 @dp.message(Command("setlotteryduration"))
@@ -1767,18 +2501,83 @@ async def cmd_setlotteryedge(message: Message):
     await message.answer(f"✅ Комиссия лотереи теперь {percent:.0f}%.")
 
 
+@dp.message(Command("setcoinflipedge"))
+async def cmd_setcoinflipedge(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    try:
+        percent = float(parts[1]) if len(parts) == 2 else None
+    except ValueError:
+        percent = None
+    if percent is None or not (0 <= percent <= 50):
+        await message.answer("Использование: <code>/setcoinflipedge [проценты]</code>, например "
+                              "<code>/setcoinflipedge 5</code> (0-50) — хаус-эдж для /coinflip и /dice.")
+        return
+    db.set_setting("coinflip_dice_house_edge", percent / 100)
+    await message.answer(f"✅ Хаус-эдж /coinflip и /dice теперь {percent:.0f}%.")
+
+
+@dp.message(Command("setbetlimit"))
+async def cmd_setbetlimit(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    try:
+        percent = float(parts[1]) if len(parts) == 2 else None
+    except ValueError:
+        percent = None
+    if percent is None or not (0 < percent <= 100):
+        await message.answer("Использование: <code>/setbetlimit [проценты]</code>, например "
+                              "<code>/setbetlimit 15</code> — максимальная ставка как % от баланса игрока "
+                              "(лимит стола, как в реальном казино). Итоговый лимит — минимум из этого и /setmaxbet.")
+        return
+    db.set_setting("max_bet_percent_of_balance", percent)
+    await message.answer(f"✅ Лимит ставки теперь {percent:.0f}% от баланса (плюс потолок /setmaxbet).")
+
+
+@dp.message(Command("setmaxpayout"))
+async def cmd_setmaxpayout(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Использование: <code>/setmaxpayout [сумма]</code> — максимальный выигрыш "
+                              "за один раунд в любой игре (как лимит выплат в реальном казино).")
+        return
+    db.set_setting("max_single_payout", int(parts[1]))
+    await message.answer(f"✅ Максимальный выигрыш за раунд теперь {fmt(int(parts[1]))} {cur()}.")
+
+
+@dp.message(Command("setbizcap"))
+async def cmd_setbizcap(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit() or int(parts[1]) < 1:
+        await message.answer("Использование: <code>/setbizcap [число]</code> — максимум единиц одного "
+                              "бизнеса в одни руки.")
+        return
+    db.set_setting("business_max_quantity", int(parts[1]))
+    await message.answer(f"✅ Лимит бизнеса одного типа теперь {parts[1]} шт.")
+
+
 @dp.message(Command("setworkreward"))
 async def cmd_setworkreward(message: Message):
     if not is_owner(message.from_user.id):
         return
     parts = message.text.split()
-    if len(parts) != 3 or not (parts[1].isdigit() and parts[2].isdigit()) or int(parts[1]) > int(parts[2]):
-        await message.answer("Использование: <code>/setworkreward [мин] [макс]</code>, например "
-                              "<code>/setworkreward 50 300</code>.")
+    try:
+        multiplier = float(parts[1]) if len(parts) == 2 else None
+    except ValueError:
+        multiplier = None
+    if multiplier is None or multiplier <= 0:
+        await message.answer("Использование: <code>/setworkreward [множитель]</code> — масштабирует "
+                              "зарплату всех профессий сразу, например <code>/setworkreward 1.5</code> "
+                              "(+50% ко всем зарплатам).")
         return
-    db.set_setting("work_min", int(parts[1]))
-    db.set_setting("work_max", int(parts[2]))
-    await message.answer(f"✅ Награда за /work теперь от {parts[1]} до {parts[2]} тенге.")
+    db.set_setting("work_pay_multiplier", multiplier)
+    await message.answer(f"✅ Множитель зарплат /work теперь x{multiplier}.")
 
 
 @dp.message(Command("setworkcooldown"))
@@ -1798,6 +2597,143 @@ async def cmd_setworkcooldown(message: Message):
     await message.answer(f"✅ Кулдаун /work теперь {format_duration(seconds)}.")
 
 
+@dp.message(Command("settaxrate"))
+async def cmd_settaxrate(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    try:
+        percent = float(parts[1]) if len(parts) == 2 else None
+    except ValueError:
+        percent = None
+    if percent is None or percent < 0:
+        await message.answer("Использование: <code>/settaxrate [проценты в час от стоимости]</code>, "
+                              "например <code>/settaxrate 0.001</code> (коммуналка за квартиры/дома/самолёты/"
+                              "вертолёты/водный транспорт).")
+        return
+    db.set_setting("property_tax_rate", percent / 100)
+    await message.answer(f"✅ Ставка коммуналки теперь {percent}%/час от стоимости имущества.")
+
+
+@dp.message(Command("setcartaxrate"))
+async def cmd_setcartaxrate(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    try:
+        percent = float(parts[1]) if len(parts) == 2 else None
+    except ValueError:
+        percent = None
+    if percent is None or percent < 0:
+        await message.answer("Использование: <code>/setcartaxrate [проценты в час от стоимости]</code>, "
+                              "например <code>/setcartaxrate 0.0005</code> (транспортный налог).")
+        return
+    db.set_setting("car_tax_rate", percent / 100)
+    await message.answer(f"✅ Ставка транспортного налога теперь {percent}%/час от стоимости машины.")
+
+
+@dp.message(Command("setbiztax"))
+async def cmd_setbiztax(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    try:
+        percent = float(parts[1]) if len(parts) == 2 else None
+    except ValueError:
+        percent = None
+    if percent is None or not (0 <= percent <= 90):
+        await message.answer("Использование: <code>/setbiztax [проценты]</code>, например "
+                              "<code>/setbiztax 10</code> (0-90) — налог с дохода при /collect.")
+        return
+    db.set_setting("business_tax_percent", percent)
+    await message.answer(f"✅ Налог на бизнес теперь {percent:.0f}% с каждого /collect.")
+
+
+@dp.message(Command("setbillsthreshold"))
+async def cmd_setbillsthreshold(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Использование: <code>/setbillsthreshold [сумма]</code> — при каком долге "
+                              "по счетам блокируются новые покупки имущества/машин/бизнесов.")
+        return
+    db.set_setting("bills_block_threshold", int(parts[1]))
+    await message.answer(f"✅ Порог блокировки покупок при долге теперь {parts[1]} {cur()}.")
+
+
+@dp.message(Command("setloanmax"))
+async def cmd_setloanmax(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Использование: <code>/setloanmax [сумма]</code>")
+        return
+    db.set_setting("loan_max_amount", int(parts[1]))
+    await message.answer(f"✅ Максимальный кредит теперь {fmt(int(parts[1]))} {cur()}.")
+
+
+@dp.message(Command("setloanrate"))
+async def cmd_setloanrate(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    try:
+        percent = float(parts[1]) if len(parts) == 2 else None
+    except ValueError:
+        percent = None
+    if percent is None or percent < 0:
+        await message.answer("Использование: <code>/setloanrate [проценты]</code>, например "
+                              "<code>/setloanrate 15</code> — ставка по кредиту за весь срок.")
+        return
+    db.set_setting("loan_interest_rate", percent / 100)
+    await message.answer(f"✅ Ставка по кредиту теперь {percent:.0f}% за срок.")
+
+
+@dp.message(Command("setwarnthreshold"))
+async def cmd_setwarnthreshold(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or not parts[1].isdigit() or int(parts[1]) < 1:
+        await message.answer("Использование: <code>/setwarnthreshold [число]</code> — сколько варнов "
+                              "до автосанкции.")
+        return
+    db.set_setting("warn_threshold", int(parts[1]))
+    await message.answer(f"✅ Лимит предупреждений теперь {parts[1]}.")
+
+
+@dp.message(Command("setwarnaction"))
+async def cmd_setwarnaction(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 2 or parts[1].lower() not in ("mute", "kick", "ban"):
+        await message.answer("Использование: <code>/setwarnaction [mute/kick/ban]</code> — что происходит "
+                              "при достижении лимита предупреждений.")
+        return
+    db.set_setting("warn_action", parts[1].lower())
+    await message.answer(f"✅ Санкция за лимит предупреждений теперь: {parts[1].lower()}.")
+
+
+@dp.message(Command("setmutetime"))
+async def cmd_setmutetime(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("Использование: <code>/setmutetime [время]</code> — мут по умолчанию, "
+                              "если в /mute не указано время явно. Пример: <code>/setmutetime 30m</code>")
+        return
+    seconds = parse_duration(parts[1])
+    if seconds is None or seconds <= 0:
+        await message.answer("Не понял время. Примеры: 30m, 1h.")
+        return
+    db.set_setting("mute_default_minutes", seconds // 60)
+    await message.answer(f"✅ Мут по умолчанию теперь {format_duration(seconds)}.")
+
+
 @dp.message(Command("resetalleconomy"))
 async def cmd_resetalleconomy(message: Message):
     if not is_owner(message.from_user.id):
@@ -1810,7 +2746,326 @@ async def cmd_resetalleconomy(message: Message):
         return
     start = int(db.get_setting("start_balance", db.START_BALANCE))
     db.reset_all_balances(start)
-    await message.answer(f"✅ Баланс всех игроков сброшен до {start} тенге.")
+    await message.answer(f"✅ Баланс всех игроков сброшен до {fmt(start)} {cur()}.")
+
+
+# ---------------- Group moderation (real Telegram mute/ban/warn, admin-only) ----------------
+
+MUTE_PERMISSIONS_OFF = ChatPermissions(
+    can_send_messages=False, can_send_other_messages=False,
+    can_add_web_page_previews=False, can_send_polls=False,
+)
+MUTE_PERMISSIONS_ON = ChatPermissions(
+    can_send_messages=True, can_send_other_messages=True,
+    can_add_web_page_previews=True, can_send_polls=True,
+)
+
+
+async def _get_mod_target(message: Message):
+    """Resolves the target user from a reply, blocking action on bots/admins/owner. Returns (user, error)."""
+    if message.chat.type not in ("group", "supergroup"):
+        return None, "Эта команда работает только в групповых чатах."
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        return None, "Ответь (reply) на сообщение нужного пользователя."
+    target = message.reply_to_message.from_user
+    if target.is_bot:
+        return None, "Нельзя применить к боту."
+    if is_admin(target.id):
+        return None, "Нельзя применить к админу или владельцу."
+    if await is_telegram_group_admin(message.chat.id, target.id):
+        return None, "Нельзя применить к админу этой группы."
+    return target, None
+
+
+def _parse_mod_args(text_after: str, default_seconds: int) -> tuple[int | None, str]:
+    """Parses '[время] [причина]' or just '[причина]'. Returns (duration_seconds, reason);
+    duration is None for permanent."""
+    tokens = text_after.split(maxsplit=1)
+    if not tokens:
+        return default_seconds, "не указана"
+    first = tokens[0].lower()
+    rest = tokens[1] if len(tokens) > 1 else "не указана"
+    if first in ("perm", "permanent", "forever", "навсегда", "форевер"):
+        return None, rest
+    duration = parse_duration(tokens[0])
+    if duration is not None:
+        return duration, rest
+    return default_seconds, text_after
+
+
+@dp.message(Command("mute"))
+async def cmd_mute(message: Message):
+    if not await can_moderate(message):
+        return
+    target, err = await _get_mod_target(message)
+    if err:
+        await message.answer(err)
+        return
+    text_after = message.text.partition(" ")[2].strip()
+    default_seconds = int(db.get_setting("mute_default_minutes", 60)) * 60
+    duration, reason = _parse_mod_args(text_after, default_seconds)
+    try:
+        if duration is None:
+            await bot.restrict_chat_member(message.chat.id, target.id, permissions=MUTE_PERMISSIONS_OFF)
+            duration_text = "навсегда"
+        else:
+            until = datetime.now(timezone.utc) + timedelta(seconds=duration)
+            await bot.restrict_chat_member(message.chat.id, target.id, permissions=MUTE_PERMISSIONS_OFF,
+                                            until_date=until)
+            duration_text = format_duration(duration)
+    except Exception as e:
+        await message.answer(f"❌ Не получилось замутить — проверь, что бот админ в этой группе с правом "
+                              f"ограничивать участников.\n({e})")
+        return
+    await message.answer(f"🔇 {target.first_name} замучен на {duration_text}.\nПричина: {reason}")
+
+
+@dp.message(Command("unmute"))
+async def cmd_unmute(message: Message):
+    if not await can_moderate(message):
+        return
+    target, err = await _get_mod_target(message)
+    if err:
+        await message.answer(err)
+        return
+    try:
+        await bot.restrict_chat_member(message.chat.id, target.id, permissions=MUTE_PERMISSIONS_ON)
+    except Exception as e:
+        await message.answer(f"❌ Не получилось размутить.\n({e})")
+        return
+    await message.answer(f"🔊 {target.first_name} размучен.")
+
+
+@dp.message(Command("ban"))
+async def cmd_ban(message: Message):
+    if not await can_moderate(message):
+        return
+    target, err = await _get_mod_target(message)
+    if err:
+        await message.answer(err)
+        return
+    text_after = message.text.partition(" ")[2].strip()
+    duration, reason = _parse_mod_args(text_after, 0)  # 0 default means "no duration" -> permanent below
+    try:
+        if not text_after or duration == 0:
+            await bot.ban_chat_member(message.chat.id, target.id)
+            duration_text = "навсегда"
+        elif duration is None:
+            await bot.ban_chat_member(message.chat.id, target.id)
+            duration_text = "навсегда"
+        else:
+            until = datetime.now(timezone.utc) + timedelta(seconds=duration)
+            await bot.ban_chat_member(message.chat.id, target.id, until_date=until)
+            duration_text = format_duration(duration)
+    except Exception as e:
+        await message.answer(f"❌ Не получилось забанить — проверь, что бот админ в этой группе с правом "
+                              f"банить участников.\n({e})")
+        return
+    await message.answer(f"🚫 {target.first_name} забанен ({duration_text}).\nПричина: {reason}")
+
+
+@dp.message(Command("unban"))
+async def cmd_unban(message: Message):
+    if not await can_moderate(message):
+        return
+    if message.chat.type not in ("group", "supergroup"):
+        await message.answer("Эта команда работает только в групповых чатах.")
+        return
+    parts = message.text.split()
+    target_id = None
+    if len(parts) == 2 and parts[1].isdigit():
+        target_id = int(parts[1])
+    elif message.reply_to_message and message.reply_to_message.from_user:
+        target_id = message.reply_to_message.from_user.id
+    else:
+        await message.answer("Использование: <code>/unban [user_id]</code> или ответом на сообщение игрока.")
+        return
+    try:
+        await bot.unban_chat_member(message.chat.id, target_id, only_if_banned=True)
+    except Exception as e:
+        await message.answer(f"❌ Не получилось разбанить.\n({e})")
+        return
+    await message.answer(f"✅ Игрок <code>{target_id}</code> разбанен.")
+
+
+@dp.message(Command("kick"))
+async def cmd_kick(message: Message):
+    if not await can_moderate(message):
+        return
+    target, err = await _get_mod_target(message)
+    if err:
+        await message.answer(err)
+        return
+    text_after = message.text.partition(" ")[2].strip() or "не указана"
+    try:
+        await bot.ban_chat_member(message.chat.id, target.id)
+        await bot.unban_chat_member(message.chat.id, target.id, only_if_banned=True)
+    except Exception as e:
+        await message.answer(f"❌ Не получилось кикнуть.\n({e})")
+        return
+    await message.answer(f"👢 {target.first_name} кикнут (может зайти обратно по ссылке).\nПричина: {text_after}")
+
+
+@dp.message(Command("warn"))
+async def cmd_warn(message: Message):
+    if not await can_moderate(message):
+        return
+    target, err = await _get_mod_target(message)
+    if err:
+        await message.answer(err)
+        return
+    reason = message.text.partition(" ")[2].strip() or "не указана"
+    now = datetime.now(timezone.utc).isoformat()
+    db.add_warning(message.chat.id, target.id, reason, message.from_user.id, now)
+    count = db.count_warnings(message.chat.id, target.id)
+    threshold = int(db.get_setting("warn_threshold", 3))
+    text = f"⚠️ {target.first_name} получил предупреждение ({count}/{threshold})\nПричина: {reason}"
+
+    if count >= threshold:
+        db.clear_warnings(message.chat.id, target.id)
+        action = db.get_setting("warn_action", "mute")
+        try:
+            if action == "ban":
+                await bot.ban_chat_member(message.chat.id, target.id)
+                text += f"\n\n🚫 Лимит предупреждений достигнут — {target.first_name} забанен."
+            elif action == "kick":
+                await bot.ban_chat_member(message.chat.id, target.id)
+                await bot.unban_chat_member(message.chat.id, target.id, only_if_banned=True)
+                text += f"\n\n👢 Лимит предупреждений достигнут — {target.first_name} кикнут."
+            else:
+                mute_minutes = int(db.get_setting("warn_mute_minutes", 60))
+                until = datetime.now(timezone.utc) + timedelta(minutes=mute_minutes)
+                await bot.restrict_chat_member(message.chat.id, target.id, permissions=MUTE_PERMISSIONS_OFF,
+                                                until_date=until)
+                text += f"\n\n🔇 Лимит предупреждений достигнут — {target.first_name} замучен на {mute_minutes} мин."
+        except Exception as e:
+            text += f"\n\n❌ Не получилось применить санкцию автоматически.\n({e})"
+
+    await message.answer(text)
+
+
+@dp.message(Command("unwarn"))
+async def cmd_unwarn(message: Message):
+    if not await can_moderate(message):
+        return
+    target, err = await _get_mod_target(message)
+    if err:
+        await message.answer(err)
+        return
+    if not db.remove_last_warning(message.chat.id, target.id):
+        await message.answer(f"У {target.first_name} нет предупреждений.")
+        return
+    count = db.count_warnings(message.chat.id, target.id)
+    await message.answer(f"✅ Предупреждение снято у {target.first_name}. Осталось: {count}")
+
+
+@dp.message(Command("warns"))
+async def cmd_warns(message: Message):
+    if message.chat.type not in ("group", "supergroup"):
+        await message.answer("Эта команда работает только в групповых чатах.")
+        return
+    if message.reply_to_message and message.reply_to_message.from_user:
+        if not await can_moderate(message):
+            await message.answer("Смотреть чужие предупреждения могут только админы группы.")
+            return
+        target = message.reply_to_message.from_user
+    else:
+        target = message.from_user
+    rows = db.get_warnings(message.chat.id, target.id)
+    if not rows:
+        await message.answer(f"У {target.first_name} нет предупреждений.")
+        return
+    text = f"⚠️ <b>Предупреждения {target.first_name}:</b> {len(rows)}\n\n"
+    for i, r in enumerate(rows, 1):
+        text += f"{i}. {r['reason']}\n"
+    await message.answer(text)
+
+
+# ---------------- Owner: create/remove currency (печать бабла — только владелец) ----------------
+
+@dp.message(Command("give"))
+async def cmd_give(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer("Использование: <code>/give [user_id] [сумма]</code>\n"
+                              "Сумма может быть отрицательной, чтобы забрать средства.")
+        return
+    try:
+        target_id = int(parts[1])
+        amount = int(parts[2])
+    except ValueError:
+        await message.answer("user_id и сумма должны быть числами.")
+        return
+    if not db.user_exists(target_id):
+        await message.answer("Такого пользователя нет в базе (он ещё не запускал /start у бота).")
+        return
+    db.admin_add_balance(target_id, amount)
+    new_balance = db.get_balance(target_id)
+    await message.answer(f"✅ Игроку <code>{target_id}</code> начислено {fmt(amount)}. Новый баланс: {fmt(new_balance)}")
+    try:
+        sign = "➕" if amount >= 0 else "➖"
+        await bot.send_message(target_id, f"{sign} Владелец изменил твой баланс на {fmt(amount)}.\n"
+                                           f"Текущий баланс: <b>{fmt(new_balance)}</b> {cur()}")
+    except Exception:
+        pass  # user may have blocked the bot
+
+
+@dp.message(Command("take"))
+async def cmd_take(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer("Использование: <code>/take [user_id] [сумма]</code> — списать средства у игрока "
+                              "(сумма всегда положительная; если у игрока меньше — спишется весь баланс).")
+        return
+    try:
+        target_id = int(parts[1])
+        amount = int(parts[2])
+    except ValueError:
+        await message.answer("user_id и сумма должны быть числами.")
+        return
+    if amount <= 0:
+        await message.answer("Сумма списания должна быть положительной.")
+        return
+    if not db.user_exists(target_id):
+        await message.answer("Такого пользователя нет в базе.")
+        return
+    removed = db.take_balance(target_id, amount)
+    new_balance = db.get_balance(target_id)
+    await message.answer(f"✅ У игрока <code>{target_id}</code> списано {fmt(removed)} {cur()}. Баланс: {fmt(new_balance)}")
+    try:
+        await bot.send_message(target_id, f"➖ Владелец списал <b>{fmt(removed)}</b> {cur()}.\n"
+                                           f"Текущий баланс: <b>{fmt(new_balance)}</b> {cur()}")
+    except Exception:
+        pass
+
+
+@dp.message(Command("setbalance"))
+async def cmd_setbalance(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer("Использование: <code>/setbalance [user_id] [сумма]</code> — жёстко "
+                              "выставить баланс игрока (в отличие от /give, который добавляет/вычитает).")
+        return
+    try:
+        target_id = int(parts[1])
+        amount = int(parts[2])
+    except ValueError:
+        await message.answer("user_id и сумма должны быть числами.")
+        return
+    if amount < 0:
+        await message.answer("Баланс не может быть отрицательным.")
+        return
+    if not db.user_exists(target_id):
+        await message.answer("Такого пользователя нет в базе.")
+        return
+    db.set_balance(target_id, amount)
+    await message.answer(f"✅ Баланс игрока <code>{target_id}</code> выставлен в {fmt(amount)}.")
 
 
 # ---------------- Owner: manage admins ----------------
@@ -1832,8 +3087,8 @@ async def cmd_addadmin(message: Message):
     await set_admin_menu(target_id)
     await message.answer(f"✅ <code>{target_id}</code> назначен админом.")
     try:
-        await bot.send_message(target_id, "🎉 Тебя назначили админом бота! Доступны /give, /broadcast, /giveaway "
-                                           "и другие — загляни в меню команд (кнопка /).")
+        await bot.send_message(target_id, "🎉 Тебя назначили админом бота! Доступны /mute, /warn, /ban, "
+                                           "/broadcast и другие — загляни в меню команд (кнопка /).")
     except Exception:
         pass
 
@@ -1864,27 +3119,43 @@ async def cmd_admins(message: Message):
 
     text = "👑 <b>Владелец</b>\n"
     if OWNER_ID:
-        owner_balance = db.get_balance(OWNER_ID) if db.user_exists(OWNER_ID) else "—"
-        text += f"{OWNER_ID} (баланс: {owner_balance} ₸)\n\n"
+        owner_balance_text = fmt(db.get_balance(OWNER_ID)) if db.user_exists(OWNER_ID) else "—"
+        text += f"{OWNER_ID} (баланс: {owner_balance_text} {cur()})\n\n"
     else:
         text += "не задан\n\n"
 
     text += "🛡 <b>Админы</b>\n"
     if ids:
         for i in ids:
-            balance = db.get_balance(i) if db.user_exists(i) else "—"
-            text += f"— {i} (баланс: {balance} ₸)\n"
+            balance_text = fmt(db.get_balance(i)) if db.user_exists(i) else "—"
+            text += f"— {i} (баланс: {balance_text} {cur()})\n"
     else:
         text += "пока нет.\n"
 
     text += "\nℹ️ Балансы владельца и админов ведутся отдельно от рейтинга игроков — " \
-            "они не отображаются в /top и /grouptop."
+            "они не отображаются в /tops и /grouptop."
     await message.answer(text)
+
+
+async def crypto_price_loop():
+    while True:
+        await asyncio.sleep(CRYPTO_UPDATE_INTERVAL_SECONDS)
+        try:
+            for row in db.get_all_crypto_prices():
+                symbol = row["symbol"]
+                price = row["price"]
+                volatility = CRYPTO_VOLATILITY.get(symbol, 0.03)
+                change = random.uniform(-volatility, volatility)
+                new_price = max(price * (1 + change), price * 0.01)  # never crash to literal zero
+                db.update_crypto_price(symbol, new_price, price)
+        except Exception:
+            logging.exception("Crypto price update failed")
 
 
 async def main():
     db.init_db()
     await setup_default_menus()
+    asyncio.create_task(crypto_price_loop())
     await dp.start_polling(bot)
 
 
