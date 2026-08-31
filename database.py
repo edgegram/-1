@@ -22,7 +22,7 @@ DEFAULT_SETTINGS = {
     "daily_bonus": "500",
     "daily_streak_step": "50",   # extra golda per consecutive daily-streak day
     "daily_streak_cap": "9",     # streak days after which the bonus stops growing
-    "min_bet": "10",
+    "min_bet": "1000",
     "max_bet": "200000",
     "max_bet_percent_of_balance": "15",
     "max_single_payout": "5000000",
